@@ -1,0 +1,165 @@
+services:
+  # MinIO Object Storage
+  minio:
+    image: minio/minio:latest
+    container_name: f1-minio
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    env_file:
+      - ../.env
+    volumes:
+      - minio_data:/data
+    command: server /data --console-address ":9001"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+    networks:
+      - f1-network
+
+  # PostgreSQL Database
+  postgres:
+    image: postgres:16-alpine
+    container_name: f1-postgres
+    ports:
+      - "5432:5432"
+    env_file:
+      - ../.env
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ../scripts/database/init-db.sql:/docker-entrypoint-initdb.d/init-db.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - f1-network
+
+  # MLflow Tracking Server
+  mlflow:
+    build:
+      context: ./Dockerfiles
+      dockerfile: Dockerfile.mlflow
+    container_name: f1-mlflow
+    ports:
+      - "5001:5000"
+    env_file:
+      - ../.env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    command: >
+      mlflow server
+      --backend-store-uri postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/mlflow
+      --default-artifact-root s3://mlflow-artifacts/
+      --host 0.0.0.0
+      --port 5000
+    networks:
+      - f1-network
+
+  # Dagster Daemon
+  dagster-daemon:
+    build:
+      context: ./Dockerfiles
+      dockerfile: Dockerfile.dagster
+    container_name: f1-dagster-daemon
+    env_file:
+      - ../.env
+    environment:
+      DAGSTER_POSTGRES_USER: ${POSTGRES_USER}
+      DAGSTER_POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      DAGSTER_POSTGRES_DB: dagster
+      DAGSTER_POSTGRES_HOST: postgres
+      DAGSTER_POSTGRES_PORT: 5432
+      DAGSTER_HOME: /opt/dagster/dagster_home
+      MINIO_ENDPOINT: http://minio:9000
+      MINIO_ACCESS_KEY: ${MINIO_ROOT_USER}
+      MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD}
+      MLFLOW_TRACKING_URI: http://mlflow:5000
+    volumes:
+      # Mount code
+      - ../dagster_project:/opt/dagster/app/dagster_project
+      - ../config:/opt/dagster/app/config
+      - ../scripts:/opt/dagster/app/scripts
+      - ../src:/opt/dagster/app/src
+      - ../data:/opt/dagster/app/data
+      - ../pyproject.toml:/opt/dagster/app/pyptoject.toml
+
+      # Mount configuration files to dagster_home
+      - ../configs/dagster.yaml:/opt/dagster/dagster_home/dagster.yaml:ro
+      - ../configs/workspace.yaml:/opt/dagster/dagster_home/workspace.yaml:ro
+
+      # Mount monitoring folder for your custom logs
+      - ../monitoring:/opt/dagster/app/monitoring
+    command: dagster-daemon run -w /opt/dagster/dagster_home/workspace.yaml
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    networks:
+      - f1-network
+
+  # Dagster Webserver (Dagit UI)
+  dagster-webserver:
+    build:
+      context: ./Dockerfiles
+      dockerfile: Dockerfile.dagster
+    container_name: f1-dagster-webserver
+    ports:
+      - "3000:3000"
+    env_file:
+      - ../.env
+    environment:
+      DAGSTER_POSTGRES_USER: ${POSTGRES_USER}
+      DAGSTER_POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      DAGSTER_POSTGRES_DB: dagster
+      DAGSTER_POSTGRES_HOST: postgres
+      DAGSTER_POSTGRES_PORT: 5432
+      DAGSTER_HOME: /opt/dagster/dagster_home
+      MINIO_ENDPOINT: http://minio:9000
+      MINIO_ACCESS_KEY: ${MINIO_ROOT_USER}
+      MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD}
+      MLFLOW_TRACKING_URI: http://mlflow:5000
+    volumes:
+      # Mount code
+      - ../dagster_project:/opt/dagster/app/dagster_project
+      - ../config:/opt/dagster/app/config
+      - ../scripts:/opt/dagster/app/scripts
+      - ../src:/opt/dagster/app/src
+      - ../data:/opt/dagster/app/data
+      - ../pyproject.toml:/opt/dagster/app/pyptoject.toml
+
+      # Mount configuration files to dagster_home
+      - ../configs/dagster.yaml:/opt/dagster/dagster_home/dagster.yaml:ro
+      - ../configs/workspace.yaml:/opt/dagster/dagster_home/workspace.yaml:ro
+
+      # Mount monitoring folder for your custom logs
+      - ../monitoring:/opt/dagster/app/monitoring
+    command: dagster-webserver -h 0.0.0.0 -p 3000 -w /opt/dagster/dagster_home/workspace.yaml
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    networks:
+      - f1-network
+    restart: unless-stopped
+
+networks:
+  f1-network:
+    name: f1-network
+    driver: bridge
+
+volumes:
+  minio_data:
+    name: f1-minio-data
+    driver: local
+  postgres_data:
+    name: f1-postgres-data
+    driver: local
