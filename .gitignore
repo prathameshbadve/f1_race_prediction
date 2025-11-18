@@ -10,5 +10,21 @@ docker/.env
 # Notebooks
 notebooks/
 
-# Logs
-monitoring/
+# Linters and formatters
+.vscode/
+.idea/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.secrets.baseline
+.pre-commit-config.yaml.bak
+.coverage
+htmlcov/
+
+# Data files
+data/
+monitoring/logs/
+
+# OS
+.DS_Store
+Thumbs.db
