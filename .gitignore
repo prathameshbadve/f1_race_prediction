@@ -11,7 +11,7 @@ docker/.env
 # Notebooks
 notebooks/
 
-# Linters and formatters
+# Linters, formatters and testing
 .vscode/
 .idea/
 .mypy_cache/
@@ -21,6 +21,7 @@ notebooks/
 .pre-commit-config.yaml.bak
 .coverage
 htmlcov/
+coverage.xml
 
 # Data files
 data/external/
