@@ -5,6 +5,7 @@ __pycache__/
 
 # Environment variable files
 .env
+.env.prod
 docker/.env
 
 # Notebooks
