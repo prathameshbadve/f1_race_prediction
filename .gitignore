@@ -22,7 +22,7 @@ notebooks/
 htmlcov/
 
 # Data files
-data/
+data/external/
 monitoring/logs/
 
 # OS
