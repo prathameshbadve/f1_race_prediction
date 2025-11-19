@@ -27,6 +27,7 @@ s3fs==2025.10.0
 
 # Postgres & DB
 psycopg2-binary==2.9.11
+supabase==2.24.0
 
 # MLflow
 mlflow==3.5.1
