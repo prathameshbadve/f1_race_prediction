@@ -37,6 +37,7 @@ pytest-asyncio==1.2.0
 pytest-benchmark==5.1.0
 pytest-cov==7.0.0
 pytest-mock==3.15.1
+pytest-env==1.2.0
 
 # Code quality
 black==25.9.0
