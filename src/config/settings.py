@@ -38,41 +38,56 @@ class BucketConfig(BaseConfig):
     Configuration for MinIO/S3 Bucket Storage.
     """
 
-    endpoint: str | None = None
-    access_key: str | None = None
-    secret_key: str | None = None
+    endpoint_url: str | None = None
+    access_key: str = "access_key"
+    secret_key: str = "secret_key"
+    region_name: str | None = None
     raw_data_bucket: str | None = None
     processed_data_bucket: str | None = None
-    region: str | None = None
-    secure: bool | None = False
+    model_bucket: str | None = None
+    backend: str = "postgresql"
 
     @classmethod
     def from_env(cls):
         """Factory to create StorageConfig from environment variables."""
 
-        if cls.environment == Environment.DEVELOPMENT.value:
-            # In development, use local MinIO settings
-            return cls(
-                endpoint=os.getenv("MINIO_ENDPOINT", "localhost:9000"),
-                access_key=os.getenv("MINIO_ROOT_USER", "minioadmin"),
-                secret_key=os.getenv("MINIO_ROOT_PASSWORD", "minioadmin"),
-                raw_data_bucket=os.getenv("RAW_DATA_BUCKET", "f1-data-raw"),
-                processed_data_bucket=os.getenv(
-                    "PROCESSED_DATA_BUCKET", "f1-data-processed"
-                ),
-                region=os.getenv("REGION", "ap-south-1"),
-                secure=os.getenv("SECURE", "False").lower() == "true",
-            )
-
-        # In production, use environment-provided AWS settings
         return cls(
-            endpoint=os.getenv("AWS_S3_ENDPOINT_URL"),
-            access_key=os.getenv("AWS_ACCESS_KEY_ID"),
-            secret_key=os.getenv("AWS_SECRET_ACCESS_KEY"),
-            raw_data_bucket=os.getenv("RAW_DATA_BUCKET"),
-            processed_data_bucket=os.getenv("PROCESSED_DATA_BUCKET"),
-            region=os.getenv("REGION", "ap-south-1"),
-            secure=os.getenv("AWS_SECURE", "False").lower() == "true",
+            endpoint_url=os.getenv("DOCKER_ENDPOINT", "localhost:9000"),
+            access_key=os.getenv("ACCESS_KEY", "minioadmin"),
+            secret_key=os.getenv("SECRET_KEY", "minioadmin"),
+            region_name=os.getenv("REGION", "ap-south-1"),
+            raw_data_bucket=os.getenv("RAW_DATA_BUCKET", "f1-data-raw"),
+            processed_data_bucket=os.getenv(
+                "PROCESSED_DATA_BUCKET", "f1-data-processed"
+            ),
+            model_bucket=os.getenv("MODEL_BUCKET", "f1-model-artifacts"),
+            backend=os.getenv("DB_BACKEND", "postgresql"),
+        )
+
+
+class DatabaseConfig(BaseConfig):
+    """Configuration for Database connection."""
+
+    connection_string: str | None = None
+    host: str | None = None
+    port: int | None = None
+    user: str | None = None
+    password: str | None = None
+    database: str | None = None
+    backend: str = "postgresql"
+
+    @classmethod
+    def from_env(cls):
+        """Factory to create DatabaseConfig from environment variables."""
+
+        return cls(
+            connection_string=os.getenv("DB_URL"),
+            host=os.getenv("DB_HOST", "localhost"),
+            port=int(os.getenv("DB_PORT", "5432")),
+            user=os.getenv("DB_USER", "user"),
+            password=os.getenv("DB_PASSWORD", "password"),
+            database=os.getenv("DB_NAME", "data_warehouse"),
+            backend=os.getenv("DB_BACKEND", "postgresql"),
         )
 
 
