@@ -22,6 +22,7 @@ notebooks/
 .coverage
 htmlcov/
 coverage.xml
+.benchmarks/
 
 # Data files
 data/external/
