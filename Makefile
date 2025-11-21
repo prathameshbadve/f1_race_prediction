@@ -1,10 +1,14 @@
-COMPOSE := docker-compose -f docker/docker-compose.yml --env-file .env
+COMPOSE := docker-compose --env-file .env
 
 .PHONY: build-services start-services stop-services restart-services ps
 
 build-services:
 	@echo "Building Docker services..."
 	$(COMPOSE) build
+
+build-services-no-cache:
+	@echo "Building Docker services without cache..."
+	$(COMPOSE) build --no-cache
 
 start-services:
 	@echo "Starting all services..."
@@ -42,3 +46,17 @@ logs-%:
 # Postgres CLI
 postgres-cli:
 	docker exec -it f1-postgres psql -U postgres
+
+# Start individual services
+start-%:
+	$(COMPOSE) up -d $*
+
+# Delete log files
+clean-logs:
+	@echo "Deleting log files..."
+	rm -f monitoring/logs/*.log
+	@echo "Log files deleted."
+	@echo "----------------------"
+	@echo "Creating new empty log fiels..."
+	touch monitoring/logs/app.log monitoring/logs/error.log monitoring/logs/data_ingestion.log monitoring/logs/data_processing.log monitoring/logs/resources.log monitoring/logs/fastf1.log
+	@echo "New empty log files created."
