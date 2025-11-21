@@ -11,7 +11,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-from src.utils.helpers import ensure_directory
+from src.utils.helpers import ensure_directory, get_project_root
 
 load_dotenv()
 
@@ -94,14 +94,14 @@ class DetailedFormatter(logging.Formatter):
 def setup_logging():
     """Function to setup logging (only runs once)"""
 
-    project_root = "/opt/dagster/dagster_home/"
-    log_dir = project_root + LOG_DIR
+    project_root = get_project_root()
+    log_dir = project_root / LOG_DIR
     ensure_directory(Path(log_dir))
 
     # Formatters
     formatters = {
         "detailed": {
-            "()": "config.logging.DetailedFormatter",
+            "()": "src.config.logging.DetailedFormatter",
             "format": "%(asctime)s - [%(levelname)-8s] - %(name)-30s -"
             " [%(funcName)-30s:%(lineno)4d] - %(message)s",
             "datefmt": "%Y-%m-%d %H:%M:%S",
@@ -118,7 +118,7 @@ def setup_logging():
             "datefmt": "%Y-%m-%d %H:%M:%S",
         },
         "colored": {
-            "()": "config.logging.ColoredFormatter",
+            "()": "src.config.logging.ColoredFormatter",
             "format": "%(asctime)s - [%(levelname)-8s] - %(name)-30s -"
             " [%(funcName)-30s:%(lineno)4d] - %(message)s",
             "datefmt": "%Y-%m-%d %H:%M:%S",
@@ -139,7 +139,7 @@ def setup_logging():
             "class": "logging.handlers.RotatingFileHandler",
             "level": os.getenv("LOG_LEVEL", "INFO"),
             "formatter": "detailed",
-            "filename": log_dir + "app.log",
+            "filename": log_dir / "app.log",
             "maxBytes": int(os.getenv("LOG_MAX_SIZE", "10485760")),
             "backupCount": int(os.getenv("LOG_BACKUP_COUNT", "5")),
         },
@@ -148,7 +148,7 @@ def setup_logging():
             "class": "logging.handlers.RotatingFileHandler",
             "level": os.getenv("FASTF1_LOG_LEVEL", "INFO"),
             "formatter": "detailed",
-            "filename": log_dir + "fastf1.log",
+            "filename": log_dir / "fastf1.log",
             "maxBytes": int(os.getenv("LOG_MAX_SIZE", "10485760")),
             "backupCount": int(os.getenv("LOG_BACKUP_COUNT", "5")),
         },
@@ -157,7 +157,7 @@ def setup_logging():
             "class": "logging.handlers.RotatingFileHandler",
             "level": "ERROR",
             "formatter": "detailed",
-            "filename": log_dir + "error.log",
+            "filename": log_dir / "error.log",
             "maxBytes": int(os.getenv("LOG_MAX_SIZE", "10485760")),
             "backupCount": int(os.getenv("LOG_BACKUP_COUNT", "5")),
         },
@@ -166,7 +166,7 @@ def setup_logging():
             "class": "logging.handlers.RotatingFileHandler",
             "level": os.getenv("LOG_LEVEL", "INFO"),
             "formatter": "detailed",
-            "filename": log_dir + "data_ingestion.log",
+            "filename": log_dir / "data_ingestion.log",
             "maxBytes": int(os.getenv("LOG_MAX_SIZE", "10485760")),
             "backupCount": int(os.getenv("LOG_BACKUP_COUNT", "5")),
         },
@@ -175,7 +175,7 @@ def setup_logging():
             "class": "logging.handlers.RotatingFileHandler",
             "level": os.getenv("LOG_LEVEL", "INFO"),
             "formatter": "detailed",
-            "filename": log_dir + "data_processing.log",
+            "filename": log_dir / "data_processing.log",
             "maxBytes": int(os.getenv("LOG_MAX_SIZE", "10485760")),
             "backupCount": int(os.getenv("LOG_BACKUP_COUNT", "5")),
         },
@@ -184,7 +184,7 @@ def setup_logging():
             "class": "logging.handlers.RotatingFileHandler",
             "level": os.getenv("LOG_LEVEL", "INFO"),
             "formatter": "detailed",
-            "filename": log_dir + "resources.log",
+            "filename": log_dir / "resources.log",
             "maxBytes": int(os.getenv("LOG_MAX_SIZE", "10485760")),
             "backupCount": int(os.getenv("LOG_BACKUP_COUNT", "5")),
         },
@@ -252,7 +252,7 @@ def setup_logging():
             "class": "logging.handlers.RotatingFileHandler",
             "level": "WARNING",
             "formatter": "json",
-            "filename": log_dir + "data_ingestion_json.log",
+            "filename": log_dir / "data_ingestion_json.log",
             "maxBytes": int(os.getenv("LOG_MAX_SIZE", "10485760")),
             "backupCount": int(os.getenv("LOG_BACKUP_COUNT", "5")),
         }
@@ -261,7 +261,7 @@ def setup_logging():
             "class": "logging.handlers.RotatingFileHandler",
             "level": "WARNING",
             "formatter": "json",
-            "filename": log_dir + "data_processing_json.log",
+            "filename": log_dir / "data_processing_json.log",
             "maxBytes": int(os.getenv("LOG_MAX_SIZE", "10485760")),
             "backupCount": int(os.getenv("LOG_BACKUP_COUNT", "5")),
         }
