@@ -7,7 +7,11 @@ services:
       - "9000:9000"
       - "9001:9001"
     env_file:
-      - ../.env
+      - .env
+    environment:
+      MINIO_ROOT_USER: ${ACCESS_KEY}
+      MINIO_ROOT_PASSWORD: ${SECRET_KEY}
+      MINIO_SERVER_URL: ${DOCKER_ENDPOINT}
     volumes:
       - minio_data:/data
     command: server /data --console-address ":9001"
@@ -19,6 +23,26 @@ services:
     networks:
       - f1-network
 
+  # MinIO Client - Create buckets on startup
+  minio-setup:
+    image: minio/mc:latest
+    container_name: minio-setup
+    depends_on:
+      - minio
+    entrypoint: >
+      /bin/sh -c "
+      sleep 5;
+      /usr/bin/mc alias set myminio ${DOCKER_ENDPOINT} ${ACCESS_KEY} ${SECRET_KEY};
+      /usr/bin/mc mb myminio/f1-data-raw --ignore-existing;
+      /usr/bin/mc mb myminio/f1-data-processed --ignore-existing;
+      /usr/bin/mc mb myminio/f1-model-artifacts --ignore-existing;
+      /usr/bin/mc mb myminio/test-bucket --ignore-existing;
+      /usr/bin/mc mb myminio/dagster-compute-logs --ignore-existing;
+      exit 0;
+      "
+    networks:
+      - f1-network
+
   # PostgreSQL Database
   postgres:
     image: postgres:16-alpine
@@ -26,10 +50,15 @@ services:
     ports:
       - "5432:5432"
     env_file:
-      - ../.env
+      - .env
+    environment:
+      POSTGRES_USER: ${DB_USER}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      POSTGRES_DB: ${DB_DEFAULT_NAME}
+      POSTGRES_INITDB_ARGS: "-E UTF8"
     volumes:
       - postgres_data:/var/lib/postgresql/data
-      - ../scripts/database/init-db.sql:/docker-entrypoint-initdb.d/init-db.sql
+      - ./scripts/database/init-db.sql:/docker-entrypoint-initdb.d/init-db.sql
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres"]
       interval: 10s
@@ -47,7 +76,11 @@ services:
     ports:
       - "5001:5000"
     env_file:
-      - ../.env
+      - .env
+    environment:
+      AWS_ACCESS_KEY_ID: ${ACCESS_KEY}
+      AWS_SECRET_ACCESS_KEY: ${SECRET_KEY}
+      MLFLOW_S3_ENDPOINT_URL: ${DOCKER_ENDPOINT}
     depends_on:
       postgres:
         condition: service_healthy
@@ -55,8 +88,8 @@ services:
         condition: service_healthy
     command: >
       mlflow server
-      --backend-store-uri postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/mlflow
-      --default-artifact-root s3://mlflow-artifacts/
+      --backend-store-uri postgresql://${DB_USER}:${DB_PASSWORD}@postgres:5432/mlflow
+      --default-artifact-root s3://${MODEL_BUCKET}/
       --host 0.0.0.0
       --port 5000
     networks:
@@ -69,33 +102,31 @@ services:
       dockerfile: Dockerfile.dagster
     container_name: f1-dagster-daemon
     env_file:
-      - ../.env
+      - .env
     environment:
-      DAGSTER_POSTGRES_USER: ${POSTGRES_USER}
-      DAGSTER_POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      DAGSTER_POSTGRES_USER: ${DB_USER}
+      DAGSTER_POSTGRES_PASSWORD: ${DB_PASSWORD}
       DAGSTER_POSTGRES_DB: dagster
       DAGSTER_POSTGRES_HOST: postgres
       DAGSTER_POSTGRES_PORT: 5432
       DAGSTER_HOME: /opt/dagster/dagster_home
-      MINIO_ENDPOINT: http://minio:9000
-      MINIO_ACCESS_KEY: ${MINIO_ROOT_USER}
-      MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD}
-      MLFLOW_TRACKING_URI: http://mlflow:5000
+      AWS_ACCESS_KEY_ID: ${ACCESS_KEY}
+      AWS_SECRET_ACCESS_KEY: ${SECRET_KEY}
+      AWS_ENDPOINT_URL: ${DOCKER_ENDPOINT}
     volumes:
       # Mount code
-      - ../dagster_project:/opt/dagster/app/dagster_project
-      - ../config:/opt/dagster/app/config
-      - ../scripts:/opt/dagster/app/scripts
-      - ../src:/opt/dagster/app/src
-      - ../data:/opt/dagster/app/data
-      - ../pyproject.toml:/opt/dagster/app/pyptoject.toml
+      - ./dagster_project:/opt/dagster/app/dagster_project
+      - ./scripts:/opt/dagster/app/scripts
+      - ./src:/opt/dagster/app/src
+      - ./data:/opt/dagster/app/data
+      - ./pyproject.toml:/opt/dagster/app/pyproject.toml
 
       # Mount configuration files to dagster_home
-      - ../configs/dagster.yaml:/opt/dagster/dagster_home/dagster.yaml:ro
-      - ../configs/workspace.yaml:/opt/dagster/dagster_home/workspace.yaml:ro
+      - ./dagster_configs/dagster.yaml:/opt/dagster/dagster_home/dagster.yaml:ro
+      - ./dagster_configs/workspace.yaml:/opt/dagster/dagster_home/workspace.yaml:ro
 
       # Mount monitoring folder for your custom logs
-      - ../monitoring:/opt/dagster/app/monitoring
+      - ./monitoring:/opt/dagster/app/monitoring
     command: dagster-daemon run -w /opt/dagster/dagster_home/workspace.yaml
     depends_on:
       postgres:
@@ -114,33 +145,31 @@ services:
     ports:
       - "3000:3000"
     env_file:
-      - ../.env
+      - .env
     environment:
-      DAGSTER_POSTGRES_USER: ${POSTGRES_USER}
-      DAGSTER_POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      DAGSTER_POSTGRES_USER: ${DB_USER}
+      DAGSTER_POSTGRES_PASSWORD: ${DB_PASSWORD}
       DAGSTER_POSTGRES_DB: dagster
       DAGSTER_POSTGRES_HOST: postgres
       DAGSTER_POSTGRES_PORT: 5432
       DAGSTER_HOME: /opt/dagster/dagster_home
-      MINIO_ENDPOINT: http://minio:9000
-      MINIO_ACCESS_KEY: ${MINIO_ROOT_USER}
-      MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD}
-      MLFLOW_TRACKING_URI: http://mlflow:5000
+      AWS_ACCESS_KEY_ID: ${ACCESS_KEY}
+      AWS_SECRET_ACCESS_KEY: ${SECRET_KEY}
+      AWS_ENDPOINT_URL: ${DOCKER_ENDPOINT}
     volumes:
       # Mount code
-      - ../dagster_project:/opt/dagster/app/dagster_project
-      - ../config:/opt/dagster/app/config
-      - ../scripts:/opt/dagster/app/scripts
-      - ../src:/opt/dagster/app/src
-      - ../data:/opt/dagster/app/data
-      - ../pyproject.toml:/opt/dagster/app/pyptoject.toml
+      - ./dagster_project:/opt/dagster/app/dagster_project
+      - ./scripts:/opt/dagster/app/scripts
+      - ./src:/opt/dagster/app/src
+      - ./data:/opt/dagster/app/data
+      - ./pyproject.toml:/opt/dagster/app/pyproject.toml
 
       # Mount configuration files to dagster_home
-      - ../configs/dagster.yaml:/opt/dagster/dagster_home/dagster.yaml:ro
-      - ../configs/workspace.yaml:/opt/dagster/dagster_home/workspace.yaml:ro
+      - ./dagster_configs/dagster.yaml:/opt/dagster/dagster_home/dagster.yaml:ro
+      - ./dagster_configs/workspace.yaml:/opt/dagster/dagster_home/workspace.yaml:ro
 
       # Mount monitoring folder for your custom logs
-      - ../monitoring:/opt/dagster/app/monitoring
+      - ./monitoring:/opt/dagster/app/monitoring
     command: dagster-webserver -h 0.0.0.0 -p 3000 -w /opt/dagster/dagster_home/workspace.yaml
     depends_on:
       postgres:

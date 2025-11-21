@@ -1,0 +1,5 @@
+# configs/workspace.yaml
+
+load_from:
+  - python_package: dagster_project.example
+  - python_package: dagster_project.ingestion

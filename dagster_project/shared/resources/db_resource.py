@@ -12,10 +12,10 @@ import time
 from contextlib import contextmanager
 from enum import Enum
 from typing import Any, Dict, Generator, List, Optional, Union
+from urllib.parse import quote_plus
 
 import pandas as pd
 from dagster import ConfigurableResource
-from pydantic import Field
 from sqlalchemy import (
     MetaData,
     Table,
@@ -36,6 +36,7 @@ from sqlalchemy.orm import (
 from sqlalchemy.pool import QueuePool
 
 from src.config.logging import get_logger
+from src.config.settings import DatabaseConfig
 
 # =============================================================================
 # Database Configuration
@@ -72,9 +73,9 @@ class DatabaseClient:
         connection_string: Optional[str] = None,
         host: Optional[str] = None,
         port: int = 5432,
-        database: Optional[str] = None,
         user: Optional[str] = None,
         password: Optional[str] = None,
+        database: Optional[str] = None,
         backend: DatabaseBackend = DatabaseBackend.POSTGRESQL,
         pool_size: int = 5,
         max_overflow: int = 10,
@@ -105,21 +106,23 @@ class DatabaseClient:
         self.backend = backend
         self.max_retries = max_retries
         self.retry_delay = retry_delay
-        self.logger = get_logger(__name__)
+        self.logger = get_logger("resources.database")
 
         # Build connection string
         if connection_string:
             self.connection_string = connection_string
         else:
-            if backend == DatabaseBackend.SUPABASE:
-                # Supabase uses PostgreSQL connection with specific settings
-                self.connection_string = (
-                    f"postgresql://{user}:{password}@{host}:{port}/{database}"
-                )
+            if backend == DatabaseBackend.SUPABASE.value:
+                # ToDo: Check the connection string format for
+                # Supabase and update accordingly
+                encoded_user = quote_plus(user) if user else ""
+                encoded_password = quote_plus(password) if password else ""
+                self.connection_string = f"postgresql://{encoded_user}:{encoded_password}@{host}:{port}/{database}"  # pylint: disable=line-too-long
             else:
-                self.connection_string = (
-                    f"postgresql://{user}:{password}@{host}:{port}/{database}"
-                )
+                # URL-encode credentials to handle special characters
+                encoded_user = quote_plus(user) if user else ""
+                encoded_password = quote_plus(password) if password else ""
+                self.connection_string = f"postgresql://{encoded_user}:{encoded_password}@{host}:{port}/{database}"  # pylint: disable=line-too-long
 
         # Create engine with connection pooling
         self.engine = create_engine(
@@ -261,8 +264,9 @@ class DatabaseClient:
             def _execute():
                 with self.get_session() as session:
                     result = session.execute(text(query), params or {})
+
+                    # Convert to list of dicts
                     if fetch:
-                        # Convert to list of dicts
                         columns = result.keys()
                         return [dict(zip(columns, row)) for row in result.fetchall()]
                     return None
@@ -768,20 +772,10 @@ class DatabaseResource(ConfigurableResource):
     This resource can be configured in Dagster and used across assets, ops, and jobs.
     """
 
-    host: str = Field(description="Database host")
-    port: int = Field(default=5432, description="Database port")
-    database: str = Field(description="Database name")
-    user: str = Field(description="Database user")
-    password: str = Field(description="Database password")
-    backend: str = Field(
-        default="postgresql", description="Database backend: 'postgresql' or 'supabase'"
-    )
-    pool_size: int = Field(default=5, description="Connection pool size")
-    max_overflow: int = Field(default=10, description="Max overflow connections")
-    pool_timeout: int = Field(default=30, description="Pool timeout in seconds")
-    max_retries: int = Field(default=3, description="Maximum retry attempts")
-    retry_delay: float = Field(default=1.0, description="Initial retry delay")
-    echo: bool = Field(default=False, description="Echo SQL statements")
+    def get_config(self) -> DatabaseConfig:
+        """Get fully loaded pydantic configuration from env variables"""
+
+        return DatabaseConfig.from_env()
 
     def get_client(self) -> DatabaseClient:
         """
@@ -791,22 +785,22 @@ class DatabaseResource(ConfigurableResource):
             Configured DatabaseClient instance
         """
 
-        backend_enum = DatabaseBackend(self.backend)
+        config = self.get_config()
 
         return DatabaseClient(
-            host=self.host,
-            port=self.port,
-            database=self.database,
-            user=self.user,
-            password=self.password,
-            backend=backend_enum,
-            pool_size=self.pool_size,
-            max_overflow=self.max_overflow,
-            pool_timeout=self.pool_timeout,
-            max_retries=self.max_retries,
-            retry_delay=self.retry_delay,
-            echo=self.echo,
+            host=config.host,
+            port=config.port,
+            database=config.database,
+            user=config.user,
+            password=config.password,
+            backend=DatabaseBackend(config.backend),
         )
+
+    @classmethod
+    def from_env(cls):
+        """Factory for generating DatabaseResource from environment variables."""
+
+        return cls(config=DatabaseConfig.from_env())
 
 
 # Factory function for easy standalone usage
@@ -816,7 +810,7 @@ def create_database_client(
     user: str,
     password: str,
     port: int = 5432,
-    backend: DatabaseBackend = DatabaseBackend.POSTGRESQL,
+    backend: DatabaseBackend = DatabaseBackend.POSTGRESQL.value,
     **kwargs,
 ) -> DatabaseClient:
     """
@@ -843,6 +837,6 @@ def create_database_client(
         database=database,
         user=user,
         password=password,
-        backend=backend,
+        backend=DatabaseBackend(backend),
         **kwargs,
     )

@@ -16,11 +16,12 @@ from typing import BinaryIO, Dict, List, Optional, Tuple
 
 import boto3
 from boto3.exceptions import S3UploadFailedError
+from botocore.client import Config
 from botocore.exceptions import ClientError, EndpointConnectionError
 from dagster import ConfigurableResource
-from pydantic import Field
 
 from src.config.logging import get_logger
+from src.config.settings import BucketConfig
 
 
 class SupportedFormats(Enum):
@@ -93,7 +94,7 @@ class BucketClient:
             endpoint_url: MinIO endpoint (e.g., 'http://localhost:9000'). None for S3.
             access_key: Access key for authentication
             secret_key: Secret key for authentication
-            region_name: AWS region (default: us-east-1)
+            region_name: AWS region (default: ap-south-1)
             use_ssl: Use SSL for cnxs (default: True for S3, False for local MinIO)
             max_retries: Maximum number of retry attempts for failed operations
             retry_delay: Initial delay between retries (uses exponential backoff)
@@ -102,19 +103,20 @@ class BucketClient:
         self.endpoint_url = endpoint_url
         self.max_retries = max_retries
         self.retry_delay = retry_delay
-        self.logger = get_logger("resources.bucket_resource")
+        self.logger = get_logger("resources.bucket")
 
         # Determine if using MinIO or S3
         self.is_minio = endpoint_url is not None
 
         # Configure S3 client
         self.s3_client = boto3.client(
-            "s3",
+            service_name="s3",
             endpoint_url=endpoint_url,
             aws_access_key_id=access_key,
             aws_secret_access_key=secret_key,
             region_name=region_name,
             use_ssl=use_ssl,
+            config=Config(signature_version="s3v4"),
         )
 
         self.logger.info(
@@ -409,7 +411,7 @@ class BucketClient:
                 self.s3_client.create_bucket(Bucket=bucket_name)
             else:
                 # For AWS S3, need to specify location constraint
-                # for regions other than us-east-1
+                # for regions other than ap-south-1
                 location = {"LocationConstraint": self.s3_client.meta.region_name}
                 self.s3_client.create_bucket(
                     Bucket=bucket_name,
@@ -521,36 +523,32 @@ class BucketResource(ConfigurableResource):
     This resource can be configured in Dagster and used across assets, ops, and jobs.
     """
 
-    endpoint_url: Optional[str] = Field(
-        default=None,
-        description="MinIO endpoint URL (eg, 'http://localhost:9000'). None for S3.",
-    )
-    access_key: str = Field(description="Access key for MinIO/S3")
-    secret_key: str = Field(description="Secret key for MinIO/S3")
-    region_name: str = Field(default="us-east-1", description="AWS region")
-    use_ssl: bool = Field(default=True, description="Use SSL for connections")
-    max_retries: int = Field(default=3, description="Maximum retry attempts")
-    retry_delay: float = Field(
-        default=1.0, description="Initial retry delay in seconds"
-    )
+    def get_config(self) -> BucketConfig:
+        """Get fully loaded pydantic configuration from env variables"""
 
-    def get_client(self) -> BucketClient:
-        """
-        Get a BucketClient instance with the configured settings.
+        return BucketConfig.from_env()
 
-        Returns:
-            Configured BucketClient instance
+    def get_client(self):
         """
+        Get boto3 S3 client
+        Called automatically by Dagster before job execution.
+        """
+
+        config = self.get_config()
 
         return BucketClient(
-            endpoint_url=self.endpoint_url,
-            access_key=self.access_key,
-            secret_key=self.secret_key,
-            region_name=self.region_name,
-            use_ssl=self.use_ssl,
-            max_retries=self.max_retries,
-            retry_delay=self.retry_delay,
+            endpoint_url=config.endpoint_url,
+            access_key=config.access_key,
+            secret_key=config.secret_key,
+            region_name=config.region_name,
+            use_ssl=True if config.endpoint_url is None else False,
         )
+
+    @classmethod
+    def from_env(cls):
+        """Factory to create BucketResource from environment variables."""
+
+        return cls(config=BucketConfig.from_env())
 
 
 # Factory function for easy standalone usage
@@ -558,7 +556,7 @@ def create_bucket_client(
     endpoint_url: Optional[str] = None,
     access_key: Optional[str] = None,
     secret_key: Optional[str] = None,
-    region_name: str = "us-east-1",
+    region_name: str = "ap-south-1",
     use_ssl: bool = True,
 ) -> BucketClient:
     """

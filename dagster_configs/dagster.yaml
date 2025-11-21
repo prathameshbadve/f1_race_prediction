@@ -53,10 +53,8 @@ compute_logs:
   config:
     bucket: "dagster-compute-logs"
     prefix: "compute-logs"
-    local_dir: "/tmp/dagster-compute-logs" # Temporary, inside container
-    # For MinIO
     endpoint_url:
-      env: MINIO_ENDPOINT
+      env: AWS_ENDPOINT_URL
     use_ssl: false
 
 # Run launcher configuration
@@ -88,3 +86,25 @@ retention:
 sensors:
   use_threads: true
   num_workers: 4
+
+# Python logging
+python_logs:
+  managed_python_loggers:
+    - "" # Capture the root logger (recommended)
+    - src.config.logging # Capture your custom logging setup module
+
+  # Set the default log level for captured Python loggers
+  python_log_level: INFO
+
+  dagster_handler_config:
+    handlers:
+      console:
+        class: logging.StreamHandler
+        level: INFO
+        formatter: dagster
+        stream: ext://sys.stdout
+
+    formatters:
+      dagster:
+        format: "%(asctime)s - [%(levelname)-8s] - %(name)-30s - [%(funcName)-30s:%(lineno)4d] - %(message)s"
+        datefmt: "%Y-%m-%d %H:%M:%S"
