@@ -15,7 +15,7 @@ from unittest.mock import Mock
 from sqlalchemy import text
 from sqlalchemy.exc import OperationalError
 
-from dagster_project.resources.db_resource import (
+from dagster_project.shared.resources import (
     DatabaseClient,
     DatabaseResource,
     DatabaseBackend,

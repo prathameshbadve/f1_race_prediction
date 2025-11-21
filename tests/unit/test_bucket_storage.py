@@ -16,7 +16,7 @@ import pytest
 import pandas as pd
 from botocore.exceptions import ClientError
 
-from dagster_project.resources.bucket_resource import (
+from dagster_project.shared.resources import (
     BucketClient,
     BucketResource,
     BucketPath,
@@ -394,7 +394,7 @@ class TestBucketResourceDagster:
             endpoint_url="http://localhost:9000",
             access_key="test",
             secret_key="test",
-            region_name="us-east-1",
+            region_name="ap-south-1",
             use_ssl=False,
         )
 

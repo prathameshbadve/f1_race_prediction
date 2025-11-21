@@ -32,7 +32,7 @@ from dagster import (
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-from dagster_project.resources.bucket_resource import (
+from dagster_project.shared.resources import (
     BucketClient,
     BucketPath,
     BucketResource,
