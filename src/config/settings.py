@@ -5,6 +5,7 @@ All configuration settings for the project are defined in this module.
 import os
 from enum import Enum
 from pathlib import Path
+from typing import Optional
 
 from dotenv import load_dotenv
 from pydantic import BaseModel, Field
@@ -38,14 +39,13 @@ class BucketConfig(BaseConfig):
     Configuration for MinIO/S3 Bucket Storage.
     """
 
-    endpoint_url: str | None = None
-    access_key: str = "access_key"
-    secret_key: str = "secret_key"
-    region_name: str | None = None
-    raw_data_bucket: str | None = None
-    processed_data_bucket: str | None = None
-    model_bucket: str | None = None
-    backend: str = "postgresql"
+    endpoint_url: Optional[str] = None
+    access_key: Optional[str] = None
+    secret_key: Optional[str] = None
+    region_name: str = "ap-south-1"
+    raw_data_bucket: str = "f1-data-raw"
+    processed_data_bucket: str = "f1-data-processed"
+    model_bucket: str = "f1-model-artifacts"
 
     @classmethod
     def from_env(cls):
@@ -61,19 +61,18 @@ class BucketConfig(BaseConfig):
                 "PROCESSED_DATA_BUCKET", "f1-data-processed"
             ),
             model_bucket=os.getenv("MODEL_BUCKET", "f1-model-artifacts"),
-            backend=os.getenv("DB_BACKEND", "postgresql"),
         )
 
 
 class DatabaseConfig(BaseConfig):
     """Configuration for Database connection."""
 
-    connection_string: str | None = None
-    host: str | None = None
-    port: int | None = None
-    user: str | None = None
-    password: str | None = None
-    database: str | None = None
+    connection_string: Optional[str] = None
+    host: Optional[str] = None
+    port: int = 5432
+    user: Optional[str] = None
+    password: Optional[str] = None
+    database: Optional[str] = None
     backend: str = "postgresql"
 
     @classmethod
@@ -91,24 +90,44 @@ class DatabaseConfig(BaseConfig):
         )
 
 
+class RedisConfig(BaseConfig):
+    """Congifuration for Redis Cache"""
+
+    host: Optional[str] = None
+    port: int = 6379
+    db: int = 0
+    password: Optional[str] = None
+
+    @classmethod
+    def from_env(cls):
+        """Factory to create RedisConfig from environment variables."""
+
+        return cls(
+            host=os.getenv("REDIS_DOCKER_HOST", "localhost"),
+            port=int(os.getenv("REDIS_PORT", "6379")),
+            db=int(os.getenv("REDIS_DB", "0")),
+            password=os.getenv("REDIS_PASSWORD", None),
+        )
+
+
 class FastF1Config(BaseConfig):
     """Configuration settings required for FastF1"""
 
     # Cache settings
-    cache_enabled: bool | None = None
-    cache_dir: str | None = None
-    force_renew_cache: bool | None = None
+    cache_enabled: Optional[bool] = None
+    cache_dir: Optional[str] = None
+    force_renew_cache: Optional[bool] = None
 
     # Log settings
-    log_level: str | None = None
+    log_level: Optional[str] = None
 
     # Connection settings
-    request_timeout: int | None = None
-    max_retries: int | None = None
-    retry_delay: int | None = None
+    request_timeout: Optional[int] = None
+    max_retries: Optional[int] = None
+    retry_delay: Optional[int] = None
 
     # Testing sessions
-    include_testing: bool | None = None
+    include_testing: Optional[bool] = None
 
     @classmethod
     def from_env(cls):
