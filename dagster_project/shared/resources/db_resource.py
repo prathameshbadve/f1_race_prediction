@@ -70,13 +70,7 @@ class DatabaseClient:
 
     def __init__(
         self,
-        connection_string: Optional[str] = None,
-        host: Optional[str] = None,
-        port: int = 5432,
-        user: Optional[str] = None,
-        password: Optional[str] = None,
-        database: Optional[str] = None,
-        backend: DatabaseBackend = DatabaseBackend.POSTGRESQL,
+        config: DatabaseConfig,
         pool_size: int = 5,
         max_overflow: int = 10,
         pool_timeout: int = 30,
@@ -103,26 +97,30 @@ class DatabaseClient:
             echo: Echo SQL statements (for debugging)
         """
 
-        self.backend = backend
+        self.backend = DatabaseBackend(config.backend)
         self.max_retries = max_retries
         self.retry_delay = retry_delay
         self.logger = get_logger("resources.database")
 
         # Build connection string
-        if connection_string:
-            self.connection_string = connection_string
+        if config.connection_string:
+            self.connection_string = config.connection_string
         else:
-            if backend == DatabaseBackend.SUPABASE.value:
+            if self.backend == DatabaseBackend.SUPABASE.value:
                 # ToDo: Check the connection string format for
                 # Supabase and update accordingly
-                encoded_user = quote_plus(user) if user else ""
-                encoded_password = quote_plus(password) if password else ""
-                self.connection_string = f"postgresql://{encoded_user}:{encoded_password}@{host}:{port}/{database}"  # pylint: disable=line-too-long
+                encoded_user = quote_plus(config.user) if config.user else ""
+                encoded_password = (
+                    quote_plus(config.password) if config.password else ""
+                )
+                self.connection_string = f"postgresql://{encoded_user}:{encoded_password}@{config.host}:{config.port}/{config.database}"  # pylint: disable=line-too-long
             else:
                 # URL-encode credentials to handle special characters
-                encoded_user = quote_plus(user) if user else ""
-                encoded_password = quote_plus(password) if password else ""
-                self.connection_string = f"postgresql://{encoded_user}:{encoded_password}@{host}:{port}/{database}"  # pylint: disable=line-too-long
+                encoded_user = quote_plus(config.user) if config.user else ""
+                encoded_password = (
+                    quote_plus(config.password) if config.password else ""
+                )
+                self.connection_string = f"postgresql://{encoded_user}:{encoded_password}@{config.host}:{config.port}/{config.database}"  # pylint: disable=line-too-long
 
         # Create engine with connection pooling
         self.engine = create_engine(
@@ -147,9 +145,24 @@ class DatabaseClient:
 
         self.logger.info(
             "DatabaseClient initialized (%s) with pool_size=%d",
-            backend.value,
+            self.backend.value,
             pool_size,
         )
+
+    @classmethod
+    def from_env(cls):
+        """Factory method to return object configured as per env variables"""
+
+        return cls(config=DatabaseConfig.from_env())
+
+    @classmethod
+    def from_custom_config(cls, custom_config: DatabaseConfig):
+        """
+        Factory method to return a class object configured
+        as per the provided configuration
+        """
+
+        return cls(custom_config)
 
     @contextmanager
     def get_session(self) -> Generator[Session, None, None]:
@@ -772,11 +785,6 @@ class DatabaseResource(ConfigurableResource):
     This resource can be configured in Dagster and used across assets, ops, and jobs.
     """
 
-    def get_config(self) -> DatabaseConfig:
-        """Get fully loaded pydantic configuration from env variables"""
-
-        return DatabaseConfig.from_env()
-
     def get_client(self) -> DatabaseClient:
         """
         Get a DatabaseClient instance with the configured settings.
@@ -785,58 +793,10 @@ class DatabaseResource(ConfigurableResource):
             Configured DatabaseClient instance
         """
 
-        config = self.get_config()
-
-        return DatabaseClient(
-            host=config.host,
-            port=config.port,
-            database=config.database,
-            user=config.user,
-            password=config.password,
-            backend=DatabaseBackend(config.backend),
-        )
+        return DatabaseClient.from_env()
 
     @classmethod
     def from_env(cls):
         """Factory for generating DatabaseResource from environment variables."""
 
         return cls(config=DatabaseConfig.from_env())
-
-
-# Factory function for easy standalone usage
-def create_database_client(
-    host: str,
-    database: str,
-    user: str,
-    password: str,
-    port: int = 5432,
-    backend: DatabaseBackend = DatabaseBackend.POSTGRESQL.value,
-    **kwargs,
-) -> DatabaseClient:
-    """
-    Factory function to create a DatabaseClient instance.
-
-    Useful for Streamlit apps, notebooks, or scripts.
-
-    Example:
-        >>> from dagster_project.resources.db_resource import create_database_client
-        >>> client = create_database_client(
-        ...     host="localhost",
-        ...     port=5432,
-        ...     database="f1_data",
-        ...     user="postgres",
-        ...     password="postgres",
-        ... )
-        >>> # Use the client
-        >>> results = client.query("races", filters={"year": 2024})
-    """
-
-    return DatabaseClient(
-        host=host,
-        port=port,
-        database=database,
-        user=user,
-        password=password,
-        backend=DatabaseBackend(backend),
-        **kwargs,
-    )
