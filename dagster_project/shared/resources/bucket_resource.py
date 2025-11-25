@@ -12,7 +12,7 @@ import time
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import BinaryIO, Dict, List, Optional, Tuple
+from typing import Any, BinaryIO, Dict, List, Optional, Tuple
 
 import boto3
 from boto3.exceptions import S3UploadFailedError
@@ -79,10 +79,7 @@ class BucketClient:
 
     def __init__(
         self,
-        endpoint_url: Optional[str] = None,
-        access_key: Optional[str] = None,
-        secret_key: Optional[str] = None,
-        region_name: str = "ap-south-1",
+        config: BucketConfig,
         use_ssl: bool = True,
         max_retries: int = 3,
         retry_delay: float = 1.0,
@@ -100,21 +97,24 @@ class BucketClient:
             retry_delay: Initial delay between retries (uses exponential backoff)
         """
 
-        self.endpoint_url = endpoint_url
+        self.endpoint_url = config.endpoint_url
+        self.raw_data_bucket = config.raw_data_bucket
+        self.processed_data_bucket = config.processed_data_bucket
+        self.model_bucket = config.model_bucket
         self.max_retries = max_retries
         self.retry_delay = retry_delay
         self.logger = get_logger("resources.bucket")
 
         # Determine if using MinIO or S3
-        self.is_minio = endpoint_url is not None
+        self.is_minio = config.endpoint_url is not None
 
         # Configure S3 client
         self.s3_client = boto3.client(
             service_name="s3",
-            endpoint_url=endpoint_url,
-            aws_access_key_id=access_key,
-            aws_secret_access_key=secret_key,
-            region_name=region_name,
+            endpoint_url=config.endpoint_url,
+            aws_access_key_id=config.access_key,
+            aws_secret_access_key=config.secret_key,
+            region_name=config.region_name,
             use_ssl=use_ssl,
             config=Config(signature_version="s3v4"),
         )
@@ -123,6 +123,24 @@ class BucketClient:
             "BucketClient initialized (%s)",
             "MinIO" if self.is_minio else "S3",
         )
+
+    @classmethod
+    def from_env(cls):
+        """
+        Factory method to return a class object configured
+        as per the environment variables
+        """
+
+        return cls(config=BucketConfig.from_env())
+
+    @classmethod
+    def from_custom_config(cls, custom_config: BucketConfig):
+        """
+        Factory method to return a class object configured
+        as per the provided configuration
+        """
+
+        return cls(custom_config)
 
     def _validate_file_format(self, filename: str) -> bool:
         """
@@ -189,9 +207,51 @@ class BucketClient:
 
         raise last_exception
 
+    def _resolve_bucket_and_key(
+        self,
+        bucket_path: Optional[BucketPath] = None,
+        bucket_name: Optional[str] = None,
+        object_key: Optional[str] = None,
+    ) -> Tuple[str, str, str]:
+        """
+        Resolve the bucket name, object key and filename
+        """
+
+        # At least one of BucketPath or (bucket_name and key) must be provided
+        if bucket_path is None and (bucket_name is None or object_key is None):
+            self.logger.error(
+                "Either bucket_path(of type BucketPath) or"
+                "(bucket_name and key) must be provided."
+            )
+            return False
+
+        # Only one of BucketPath or (bucket_name and key) should be provided
+        if bucket_path is not None and (
+            bucket_name is not None or object_key is not None
+        ):
+            self.logger.error(
+                "Only one of bucket_path(of type BucketPath) or"
+                "(bucket_name and key) should be provided."
+            )
+            return False
+
+        # Set filename for validation and bucket for later use
+        if bucket_path is not None:
+            filename = bucket_path.filename
+            key = bucket_path.to_key()
+            bucket = bucket_path.bucket
+        else:
+            filename = object_key
+            key = object_key
+            bucket = bucket_name
+
+        return bucket, key, filename
+
     def upload_file(
         self,
-        bucket_path: BucketPath,
+        bucket_path: Optional[BucketPath] = None,
+        bucket_name: Optional[str] = None,
+        object_key: Optional[str] = None,
         file_path: Optional[Path] = None,
         file_obj: Optional[BinaryIO] = None,
         metadata: Optional[Dict[str, str]] = None,
@@ -209,48 +269,55 @@ class BucketClient:
             True if upload successful, False otherwise
         """
 
-        if not self._validate_file_format(bucket_path.filename):
+        bucket, key, filename = self._resolve_bucket_and_key(
+            bucket_path=bucket_path,
+            bucket_name=bucket_name,
+            object_key=object_key,
+        )
+
+        if not self._validate_file_format(filename):
             # _validate_file_format handles the logging.
             # If file is valid, no message is logged.
             return False
 
+        # At least one of file_path or file_obj must be provided
         if file_path is None and file_obj is None:
             self.logger.error("Either file_path or file_obj must be provided")
             return False
 
+        # Only one of file_path or file_obj should be provided
         if file_path is not None and file_obj is not None:
             self.logger.error("Only one of file_path or file_obj should be provided")
             return False
 
         try:
-            key = bucket_path.to_key()
             extra_args = {"Metadata": metadata} if metadata else {}
 
             if file_path:
                 self._retry_with_backoff(
                     self.s3_client.upload_file,
                     str(file_path),
-                    bucket_path.bucket,
+                    bucket,
                     key,
                     ExtraArgs=extra_args,
                 )
                 self.logger.info(
                     "Uploaded %s to %s/%s",
                     file_path,
-                    bucket_path.bucket,
+                    bucket,
                     key,
                 )
             else:
                 self._retry_with_backoff(
                     self.s3_client.upload_fileobj,
                     file_obj,
-                    bucket_path.bucket,
+                    bucket,
                     key,
                     ExtraArgs=extra_args,
                 )
                 self.logger.info(
                     "Uploaded file object to %s/%s",
-                    bucket_path.bucket,
+                    bucket,
                     key,
                 )
 
@@ -262,7 +329,9 @@ class BucketClient:
 
     def download_file(
         self,
-        bucket_path: BucketPath,
+        bucket_path: Optional[BucketPath] = None,
+        bucket_name: Optional[str] = None,
+        object_key: Optional[str] = None,
         local_path: Optional[Path] = None,
     ) -> Optional[bytes]:
         """
@@ -276,33 +345,37 @@ class BucketClient:
             File content as bytes if local_path is None, otherwise None
         """
 
-        try:
-            key = bucket_path.to_key()
+        bucket, key, _ = self._resolve_bucket_and_key(
+            bucket_path=bucket_path,
+            bucket_name=bucket_name,
+            object_key=object_key,
+        )
 
+        try:
             if local_path:
                 self._retry_with_backoff(
                     self.s3_client.download_file,
-                    bucket_path.bucket,
+                    bucket,
                     key,
                     str(local_path),
                 )
                 self.logger.info(
                     "Downloaded %s/%s to %s",
-                    bucket_path.bucket,
+                    bucket,
                     key,
                     local_path,
                 )
                 return None
-            else:
-                buffer = io.BytesIO()
-                self._retry_with_backoff(
-                    self.s3_client.download_fileobj,
-                    bucket_path.bucket,
-                    key,
-                    buffer,
-                )
-                self.logger.info("Downloaded %s/%s to memory", bucket_path.bucket, key)
-                return buffer.getvalue()
+
+            buffer = io.BytesIO()
+            self._retry_with_backoff(
+                self.s3_client.download_fileobj,
+                bucket,
+                key,
+                buffer,
+            )
+            self.logger.info("Downloaded %s/%s to memory", bucket, key)
+            return buffer.getvalue()
 
         except Exception as e:  # pylint: disable=broad-except
             self.logger.error("Failed to download file: %s", str(e))
@@ -348,7 +421,12 @@ class BucketClient:
             self.logger.error("Failed to list objects: %s", str(e))
             return None
 
-    def delete_file(self, bucket_path: BucketPath) -> bool:
+    def delete_file(
+        self,
+        bucket_path: Optional[BucketPath] = None,
+        bucket_name: Optional[str] = None,
+        object_key: Optional[str] = None,
+    ) -> bool:
         """
         Delete a file from the bucket.
 
@@ -359,21 +437,32 @@ class BucketClient:
             True if deletion successful, False otherwise
         """
 
+        bucket, key, _ = self._resolve_bucket_and_key(
+            bucket_path=bucket_path,
+            bucket_name=bucket_name,
+            object_key=object_key,
+        )
+
         try:
             key = bucket_path.to_key()
             self._retry_with_backoff(
                 self.s3_client.delete_object,
-                Bucket=bucket_path.bucket,
+                Bucket=bucket,
                 Key=key,
             )
-            self.logger.info("Deleted %s/%s", bucket_path.bucket, key)
+            self.logger.info("Deleted %s/%s", bucket, key)
             return True
 
         except Exception as e:  # pylint: disable=broad-except
             self.logger.error("Failed to delete file: %s", str(e))
             return False
 
-    def file_exists(self, bucket_path: BucketPath) -> bool:
+    def file_exists(
+        self,
+        bucket_path: Optional[BucketPath] = None,
+        bucket_name: Optional[str] = None,
+        object_key: Optional[str] = None,
+    ) -> bool:
         """
         Check if a file exists in the bucket.
 
@@ -384,16 +473,22 @@ class BucketClient:
             True if file exists, False otherwise
         """
 
+        bucket, key, _ = self._resolve_bucket_and_key(
+            bucket_path=bucket_path,
+            bucket_name=bucket_name,
+            object_key=object_key,
+        )
+
         try:
-            key = bucket_path.to_key()
-            self.s3_client.head_object(Bucket=bucket_path.bucket, Key=key)
+            self.s3_client.head_object(Bucket=bucket, Key=key)
             return True
+
         except ClientError as e:
             if e.response["Error"]["Code"] == "404":
                 return False
-            else:
-                self.logger.error("Error checking file existence: %s", str(e))
-                return False
+
+            self.logger.error("Error checking file existence: %s", str(e))
+            return False
 
     def create_bucket(self, bucket_name: str) -> bool:
         """
@@ -424,9 +519,9 @@ class BucketClient:
             if e.response["Error"]["Code"] == "BucketAlreadyOwnedByYou":
                 self.logger.warning("Bucket %s already exists", bucket_name)
                 return True
-            else:
-                self.logger.error("Failed to create bucket: %s", str(e))
-                return False
+
+            self.logger.error("Failed to create bucket: %s", str(e))
+            return False
 
     def delete_bucket(self, bucket_name: str, force: bool = False) -> bool:
         """
@@ -459,7 +554,15 @@ class BucketClient:
 
     def batch_upload(
         self,
-        files: List[Tuple[BucketPath, Path]],
+        files: List[
+            Tuple[
+                Optional[BucketPath],  # BucketPath
+                Optional[str],  # bucket_name
+                Optional[str],  # object_key
+                Optional[Path],  # file_path
+                Optional[BinaryIO],  # file_obj
+            ]
+        ],
         metadata: Optional[Dict[str, str]] = None,
     ) -> Dict[str, bool]:
         """
@@ -474,11 +577,27 @@ class BucketClient:
         """
 
         results = {}
-        for bucket_path, file_path in files:
-            success = self.upload_file(
-                bucket_path, file_path=file_path, metadata=metadata
+        for (
+            bucket_path,
+            bucket_name,
+            object_key,
+            file_path,
+            file_obj,
+        ) in files:
+            _, _, filename = self._resolve_bucket_and_key(
+                bucket_path,
+                bucket_name,
+                object_key,
             )
-            results[str(file_path)] = success
+            success = self.upload_file(
+                bucket_path=bucket_path,
+                bucket_name=bucket_name,
+                object_key=object_key,
+                file_path=file_path,
+                file_obj=file_obj,
+                metadata=metadata,
+            )
+            results[filename] = success
 
         successful = sum(1 for v in results.values() if v)
         self.logger.info(
@@ -490,8 +609,15 @@ class BucketClient:
 
     def batch_download(
         self,
-        files: List[Tuple[BucketPath, Path]],
-    ) -> Dict[str, bool]:
+        files: List[
+            Tuple[
+                Optional[BucketPath],  # BucketPath
+                Optional[str],  # bucket_name
+                Optional[str],  # object_key
+                Optional[Path],  # local_path
+            ]
+        ],
+    ) -> Dict[str, Dict[str, Any]]:
         """
         Download multiple files in batch.
 
@@ -503,11 +629,35 @@ class BucketClient:
         """
 
         results = {}
-        for bucket_path, local_path in files:
-            content = self.download_file(bucket_path, local_path=local_path)
-            results[bucket_path.to_key()] = content is not None or local_path.exists()
+        for (
+            bucket_path,
+            bucket_name,
+            object_key,
+            local_path,
+        ) in files:
+            _, _, filename = self._resolve_bucket_and_key(
+                bucket_path=bucket_path,
+                bucket_name=bucket_name,
+                object_key=object_key,
+            )
+            content = self.download_file(
+                bucket_path=bucket_path,
+                bucket_name=bucket_name,
+                object_key=object_key,
+                local_path=local_path,
+            )
 
-        successful = sum(1 for v in results.values() if v)
+            results[filename] = {
+                "status": content is not None
+                or (local_path is not None and local_path.exists()),
+                "data": content if content is not None and local_path is None else None,
+            }
+
+        successful = 0
+        for v in results.values():
+            if v["status"]:
+                successful += 1
+
         self.logger.info(
             "Batch download completed: %d/%d successful",
             successful,
@@ -523,64 +673,16 @@ class BucketResource(ConfigurableResource):
     This resource can be configured in Dagster and used across assets, ops, and jobs.
     """
 
-    def get_config(self) -> BucketConfig:
-        """Get fully loaded pydantic configuration from env variables"""
-
-        return BucketConfig.from_env()
-
     def get_client(self):
         """
         Get boto3 S3 client
         Called automatically by Dagster before job execution.
         """
 
-        config = self.get_config()
-
-        return BucketClient(
-            endpoint_url=config.endpoint_url,
-            access_key=config.access_key,
-            secret_key=config.secret_key,
-            region_name=config.region_name,
-            use_ssl=True if config.endpoint_url is None else False,
-        )
+        return BucketClient.from_env()
 
     @classmethod
     def from_env(cls):
         """Factory to create BucketResource from environment variables."""
 
         return cls(config=BucketConfig.from_env())
-
-
-# Factory function for easy standalone usage
-def create_bucket_client(
-    endpoint_url: Optional[str] = None,
-    access_key: Optional[str] = None,
-    secret_key: Optional[str] = None,
-    region_name: str = "ap-south-1",
-    use_ssl: bool = True,
-) -> BucketClient:
-    """
-    Factory function to create a BucketClient instance.
-
-    Useful for Streamlit apps, notebooks, or scripts.
-
-    Example:
-        >>> from dagster_project.resources.bucket_resource import create_bucket_client
-        >>> client = create_bucket_client(
-        ...     endpoint_url="http://localhost:9000",
-        ...     access_key="minioadmin",
-        ...     secret_key="minioadmin",
-        ...     use_ssl=False,
-        ... )
-        >>> # Use the client
-        >>> path = BucketPath("f1-data-raw","2024","bahrain","practice1","data.parquet")
-        >>> client.upload_file(path, file_path=Path("data.parquet"))
-    """
-
-    return BucketClient(
-        endpoint_url=endpoint_url,
-        access_key=access_key,
-        secret_key=secret_key,
-        region_name=region_name,
-        use_ssl=use_ssl,
-    )
