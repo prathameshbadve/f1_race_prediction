@@ -7,8 +7,10 @@ Logging configuration for the project
 import logging
 import logging.config
 import os
+from datetime import datetime
 from pathlib import Path
 
+import pytz
 from dotenv import load_dotenv
 
 from src.utils.helpers import ensure_directory, get_project_root
@@ -18,6 +20,9 @@ load_dotenv()
 ENVIRONMENT = os.getenv("ENVIRONMENT", "development")
 LOG_DIR = os.getenv("LOG_DIR", "monitoring/logs/")
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
+
+# Global flag to ensure setup_logging() only runs once
+_LOGGING_CONFIGURED = False
 
 
 class ColoredFormatter(logging.Formatter):
@@ -38,16 +43,21 @@ class ColoredFormatter(logging.Formatter):
     def format(self, record: logging.LogRecord) -> str:
         # Save the original levelname
         original_levelname = record.levelname
-        origial_name = record.name
+        original_name = record.name
         original_func_name = record.funcName
+        original_created = record.created
+
+        dt = datetime.fromtimestamp(original_created, tz=pytz.UTC)
+        formatted_time = dt.astimezone(tz=pytz.timezone("Asia/Kolkata"))
+        record.asctime = formatted_time.strftime("%Y-%m-%d %H:%M:%S %Z")
 
         # Truncate logger name to length of 30
-        if len(record.name) > 30:
-            record.name = record.name[:14] + "..." + record.name[-13:]
+        if len(record.name) > 20:
+            record.name = record.name[:9] + "..." + record.name[-8:]
 
         # Truncate function name
-        if len(record.funcName) > 30:
-            record.funcName = record.funcName[:14] + "..." + record.funcName[-13:]
+        if len(record.funcName) > 20:
+            record.funcName = record.funcName[:9] + "..." + record.funcName[-8:]
 
         # Add color to level name
         if record.levelname in self.COLORS:
@@ -58,8 +68,9 @@ class ColoredFormatter(logging.Formatter):
 
         # Restore the original levelname so other handlers aren't affected
         record.levelname = original_levelname
-        record.name = origial_name
+        record.name = original_name
         record.funcName = original_func_name
+        record.created = original_created
 
         return result
 
@@ -71,28 +82,39 @@ class DetailedFormatter(logging.Formatter):
     """
 
     def format(self, record: logging.LogRecord) -> str:
-        origial_name = record.name
+        original_name = record.name
         original_func_name = record.funcName
+        original_created = record.created
+
+        dt = datetime.fromtimestamp(original_created, tz=pytz.UTC)
+        formatted_time = dt.astimezone(tz=pytz.timezone("Asia/Kolkata"))
+        record.asctime = formatted_time.strftime("%Y-%m-%d %H:%M:%S %Z")
 
         # Truncate logger name to length of 30
-        if len(record.name) > 30:
-            record.name = record.name[:14] + "..." + record.name[-13:]
+        if len(record.name) > 20:
+            record.name = record.name[:9] + "..." + record.name[-8:]
 
         # Truncate function name
-        if len(record.funcName) > 30:
-            record.funcName = record.funcName[:14] + "..." + record.funcName[-13:]
+        if len(record.funcName) > 20:
+            record.funcName = record.funcName[:9] + "..." + record.funcName[-8:]
 
         # Format the record
         result = super().format(record)
 
-        record.name = origial_name
+        record.name = original_name
         record.funcName = original_func_name
+        record.asctime = original_created
 
         return result
 
 
 def setup_logging():
     """Function to setup logging (only runs once)"""
+
+    global _LOGGING_CONFIGURED  # pylint: disable=global-statement
+
+    if _LOGGING_CONFIGURED:
+        return
 
     project_root = get_project_root()
     log_dir = project_root / LOG_DIR
@@ -102,8 +124,8 @@ def setup_logging():
     formatters = {
         "detailed": {
             "()": "src.config.logging.DetailedFormatter",
-            "format": "%(asctime)s - [%(levelname)-8s] - %(name)-30s -"
-            " [%(funcName)-30s:%(lineno)4d] - %(message)s",
+            "format": "%(asctime)s - [%(levelname)-8s] - %(name)-20s -"
+            " [%(funcName)-20s:%(lineno)4d] - %(message)s",
             "datefmt": "%Y-%m-%d %H:%M:%S",
         },
         "json": {
@@ -119,8 +141,8 @@ def setup_logging():
         },
         "colored": {
             "()": "src.config.logging.ColoredFormatter",
-            "format": "%(asctime)s - [%(levelname)-8s] - %(name)-30s -"
-            " [%(funcName)-30s:%(lineno)4d] - %(message)s",
+            "format": "%(asctime)s - [%(levelname)-8s] - %(name)-20s -"
+            " [%(funcName)-20s:%(lineno)4d] - %(message)s",
             "datefmt": "%Y-%m-%d %H:%M:%S",
         },
     }
@@ -280,6 +302,8 @@ def setup_logging():
 
     # Setting up logging configuration as per the above config dictionary
     logging.config.dictConfig(log_config)
+
+    _LOGGING_CONFIGURED = True
 
     # Log startup info
     logger = logging.getLogger("logging_config")
