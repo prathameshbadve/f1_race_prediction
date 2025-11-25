@@ -25,6 +25,9 @@ minio==7.2.18
 boto3==1.40.55
 s3fs==2025.10.0
 
+# Redis cache
+redis==7.1.0
+
 # Postgres & DB
 psycopg2-binary==2.9.11
 supabase==2.24.0
