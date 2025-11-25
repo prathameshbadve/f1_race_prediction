@@ -12,100 +12,134 @@ Run this script to test both resources working together!
 """
 
 import io
-from datetime import datetime
+from typing import Optional
 
-from dagster import asset
+import pandas as pd
+from dagster import AssetExecutionContext, StaticPartitionsDefinition, asset
 
 from dagster_project.shared.resources import (
-    BucketPath,
     BucketResource,
-    DatabaseResource,
+    CacheDataType,
+    RedisResource,
 )
 from src.config.logging import get_logger
 
 logger = get_logger("data_ingestion.example")
 
-# Asset 1
+# Example Asset 1
+
+example_partitions = StaticPartitionsDefinition(["2023", "2024"])
 
 
-@asset
-def load_data_to_db(
-    db_resource: DatabaseResource,
-):
-    """Load data to database (if needed)"""
-
-    db_client = db_resource.get_client()
-
-    logger.info("📡 Fetching race data...")
-
-    # Mock race data (replace with actual FastF1 API call)
-    race_data = {
-        "name": "Australian Grand Prix",
-        "year": 2024,
-        "round": 2,
-        "country": "Australia",
-        "circuit": "Albert Park Circuit",
-        "date": datetime(2024, 3, 16, 15, 0, 0),
-    }
-
-    insert_status = db_client.insert(
-        table_name="races", data=race_data, return_ids=True
-    )
-
-    return {
-        "status": "success",
-        "race_name": race_data["name"],
-        "race_year": race_data["year"],
-        "insert_ids": insert_status if insert_status else [],
-    }
-
-
-# Asset 2: Fetch from db and store in bucket
-@asset(deps=["load_data_to_db"])
-def fetch_and_store(
-    db_resource: DatabaseResource,
+@asset(
+    description="Example asset",
+    compute_kind="api",
+    partitions_def=example_partitions,
+)
+def example_asset_with_caching(
+    context: AssetExecutionContext,
     bucket_resource: BucketResource,
-):
-    """Fetch data from db and store in bucket"""
+    redis_resource: RedisResource,
+) -> Optional[pd.DataFrame]:
+    """Example asset"""
 
-    db_client = db_resource.get_client()
+    year = int(context.partition_key)
+
     bucket_client = bucket_resource.get_client()
+    redis_client = redis_resource.get_client()
 
-    logger.info("🔍 Query db")
+    cache_key = f"f1:test:schedule:{year}"
+    schedule_key = f"{year}/schedule.parquet"
 
-    df = db_client.query_to_dataframe(table_name="races")
+    # Layer 1: Check Redis
+    redis_hit = redis_client.exists(cache_key, CacheDataType.PARQUET)
+    if redis_hit:
+        redis_data = redis_client.get_parquet(key=cache_key)
+        context.add_output_metadata(
+            {
+                "source": "redis_cache",
+                "num_events": len(redis_data),
+                "cache_performance": "L1_HIT",
+            }
+        )
+        return redis_data
 
-    df_buffer = io.BytesIO()
-    df.to_parquet(df_buffer, index=False)
-    df_buffer.seek(0)
+    # Layer 2: Check Bucket Storage
+    bucket_hit = bucket_client.file_exists(
+        bucket_name=bucket_client.raw_data_bucket,
+        object_key=schedule_key,
+    )
+    if bucket_hit:
+        schedule_data = bucket_client.download_file(
+            bucket_name="test-bucket", object_key=schedule_key
+        )
+        schedule_df = pd.read_parquet(io.BytesIO(schedule_data))
 
-    object_key = BucketPath(
-        bucket="test-bucket",
-        year=2024,
-        grand_prix="Australian Grand Prix",
-        session="Race",
-        filename="schedule.parquet",
+        logger.info(
+            "Schedule for season %d loaded from bucket storage successfully", year
+        )
+
+        # Load data to redis cache
+        logger.info("Backfilling Redis from bucket data")
+        redis_upload_status = redis_client.cache_parquet(
+            key=cache_key,
+            df=schedule_df,
+        )
+
+        context.add_output_metadata(
+            {
+                "source": "bucket_storage",
+                "num_events": len(schedule_df),
+                "cache_performance": "L2_HIT",
+                "redis_backfill_status": redis_upload_status,
+            }
+        )
+        return schedule_df
+
+    # Layer 3: Fetch from API
+    logger.info("Cache miss - fetching from API")
+    api_df = pd.DataFrame(
+        {
+            "RoundNumber": [1, 2, 3],
+            "EventName": [
+                "Australian Grand Prix",
+                "Italian Grand Prix",
+                "United States Grand Prix",
+            ],
+            "Format": [
+                "conventional",
+                "sprint",
+                "conventional",
+            ],
+            "Year": [year, year, year],
+        }
     )
 
-    upload_status = bucket_client.upload_file(
-        bucket_path=object_key,
-        file_obj=df_buffer,
+    api_df_buffer = io.BytesIO()
+    api_df.to_parquet(api_df_buffer, index=False)
+    api_df_buffer.seek(0)
+
+    # Backfill both cache layers
+    bucket_upload_status = bucket_client.upload_file(
+        bucket_name="test-bucket",
+        object_key=schedule_key,
+        file_obj=api_df_buffer,
+    )
+    redis_upload_status = redis_client.cache_parquet(
+        key=cache_key,
+        df=api_df,
     )
 
-    return {
-        "status": upload_status,
-        "rows_fetched": len(df),
-    }
+    context.add_output_metadata(
+        {
+            "source": "fastf1_api",
+            "num_events": len(api_df),
+            "cache_performance": "CACHE_MISS",
+            "first_event": api_df.iloc[0]["EventName"],
+            "last_event": api_df.iloc[-1]["EventName"],
+            "bucket_backfill_status": bucket_upload_status,
+            "redis_backfill_status": redis_upload_status,
+        }
+    )
 
-
-# CREATE TABLE IF NOT EXISTS races (
-#     id SERIAL PRIMARY KEY,
-#     name VARCHAR(100) NOT NULL,
-#     year INTEGER NOT NULL,
-#     round INTEGER NOT NULL,
-#     country VARHCAR(50),
-#     circuit VARCHAR(100),
-#     date TIMESTAMP,
-#     create_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-#     UNIQUE (year, round),
-# );
+    return api_df
