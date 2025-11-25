@@ -8,6 +8,7 @@ This file provides:
 4. File and path fixtures
 5. Mock fixtures
 """
+
 # pylint: disable=redefined-outer-name
 
 import json
@@ -29,14 +30,15 @@ from dagster import (
     build_asset_context,
     build_op_context,
 )
-from sqlalchemy import create_engine
+from dagster._core.execution.context.invocation import DirectAssetExecutionContext
+from pytest_mock.plugin import _mocker
+from sqlalchemy import Engine, create_engine
 from sqlalchemy.orm import sessionmaker
 
 from dagster_project.shared.resources import (
     BucketClient,
     BucketPath,
     BucketResource,
-    create_bucket_client,
 )
 
 # =============================================================================
@@ -159,7 +161,9 @@ def docker_services_available() -> bool:
 
 
 @pytest.fixture(scope="session")
-def postgres_engine(test_env_vars, docker_services_available):
+def postgres_engine(
+    test_env_vars: Iterator[Dict[str, str]], docker_services_available: bool
+):
     """Create SQLAlchemy engine for PostgreSQL."""
 
     if not docker_services_available:
@@ -181,7 +185,7 @@ def postgres_engine(test_env_vars, docker_services_available):
 
 
 @pytest.fixture(scope="function")
-def db_session(postgres_engine):
+def db_session(postgres_engine: Engine):
     """Create a database session for a test."""
 
     session_object = sessionmaker(bind=postgres_engine)
@@ -199,7 +203,9 @@ def db_session(postgres_engine):
 
 
 @pytest.fixture(scope="session")
-def minio_client_session(test_env_vars, docker_services_available) -> BucketClient:
+def minio_client_session(
+    test_env_vars: Iterator[Dict[str, str]], docker_services_available: bool
+) -> BucketClient:
     """
     Create a session-scoped MinIO client for integration tests.
 
@@ -220,7 +226,7 @@ def minio_client_session(test_env_vars, docker_services_available) -> BucketClie
 
 
 @pytest.fixture(scope="function")
-def minio_client(minio_client_session) -> Iterator[BucketClient]:
+def minio_client(minio_client_session: BucketClient) -> Iterator[BucketClient]:
     """
     Function-scoped MinIO client.
 
@@ -285,21 +291,21 @@ def dagster_instance() -> Iterator[DagsterInstance]:
 
 
 @pytest.fixture
-def dagster_op_context(dagster_instance):
+def dagster_op_context(dagster_instance: Iterator[DagsterInstance]):
     """Create a Dagster op context for testing ops."""
 
     return build_op_context(instance=dagster_instance)
 
 
 @pytest.fixture
-def dagster_asset_context(dagster_instance):
+def dagster_asset_context(dagster_instance: Iterator[DagsterInstance]):
     """Create a Dagster asset context for testing assets."""
 
     return build_asset_context(instance=dagster_instance)
 
 
 @pytest.fixture
-def bucket_resource_dagster(test_env_vars) -> BucketResource:
+def bucket_resource_dagster(test_env_vars: Iterator[Dict[str, str]]) -> BucketResource:
     """Create a BucketResource for Dagster tests."""
 
     return BucketResource(
@@ -313,7 +319,10 @@ def bucket_resource_dagster(test_env_vars) -> BucketResource:
 
 
 @pytest.fixture
-def dagster_context_with_resources(dagster_asset_context, bucket_resource_dagster):
+def dagster_context_with_resources(
+    dagster_asset_context: DirectAssetExecutionContext,
+    bucket_resource_dagster: BucketResource,
+):
     """Create a Dagster context with resources attached."""
 
     # Add resources to context
@@ -516,7 +525,7 @@ def fastf1_session_mock():
 
 
 @pytest.fixture
-def mock_fastf1_api(mocker):
+def mock_fastf1_api(mocker: Callable[..., Generator[MockerFixture, None, None]]):
     """Mock the FastF1 API for testing."""
 
     mock_api = mocker.patch("fastf1.get_session")
@@ -537,7 +546,7 @@ def mock_fastf1_api(mocker):
 
 
 @pytest.fixture
-def mock_supabase_client(mocker):  # pylint: disable=unused-argument
+def mock_supabase_client(mocker: Callable[..., Generator[MockerFixture, None, None]]):  # pylint: disable=unused-argument
     """Mock Supabase client for testing."""
 
     mock_client = MagicMock()
@@ -583,7 +592,7 @@ def file_comparison_helper():
 
 
 @pytest.fixture(autouse=True)
-def cleanup_test_files(temp_dir):  # pylint: disable=unused-argument
+def cleanup_test_files(temp_dir: Path):  # pylint: disable=unused-argument
     """Automatically cleanup test files after each test."""
 
     yield
@@ -591,7 +600,7 @@ def cleanup_test_files(temp_dir):  # pylint: disable=unused-argument
 
 
 @pytest.fixture
-def capture_logs(caplog):
+def capture_logs(caplog: pytest.LogCaptureFixture):
     """Fixture to capture and analyze logs."""
 
     caplog.set_level(logging.INFO)
@@ -641,14 +650,14 @@ def benchmark_timer():
 
 
 @pytest.fixture(params=["parquet", "csv", "json"])
-def file_format(request):
+def file_format(request: pytest.FixtureRequest):
     """Parametrize tests across different file formats."""
 
     return request.param
 
 
 @pytest.fixture(params=["2023", "2024"])
-def test_year(request):
+def test_year(request: pytest.FixtureRequest):
     """Parametrize tests across different years."""
 
     return request.param
@@ -666,14 +675,14 @@ def test_year(request):
         "Spanish Grand Prix",
     ]
 )
-def grand_prix(request):
+def grand_prix(request: pytest.FixtureRequest):
     """Parametrize tests across different Grand Prix races."""
 
     return request.param
 
 
 @pytest.fixture(params=["Practice 1", "Practice 2", "Practice 3", "Qualifying", "Race"])
-def session_type(request):
+def session_type(request: pytest.FixtureRequest):
     """Parametrize tests across different session types."""
 
     return request.param
