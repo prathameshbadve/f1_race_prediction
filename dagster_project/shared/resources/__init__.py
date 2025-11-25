@@ -7,25 +7,29 @@ from .bucket_resource import (
     BucketPath,
     BucketResource,
     SupportedFormats,
-    create_bucket_client,
 )
 from .db_resource import (
     Base,
     DatabaseBackend,
     DatabaseClient,
     DatabaseResource,
-    create_database_client,
+)
+from .redis_resource import (
+    CacheDataType,
+    RedisClient,
+    RedisResource,
 )
 
 __all__ = [
-    "create_bucket_client",
-    "create_database_client",
-    "DatabaseBackend",
-    "DatabaseClient",
-    "DatabaseResource",
+    "Base",
     "BucketClient",
     "BucketPath",
     "BucketResource",
+    "CacheDataType",
+    "DatabaseBackend",
+    "DatabaseClient",
+    "DatabaseResource",
+    "RedisClient",
+    "RedisResource",
     "SupportedFormats",
-    "Base",
 ]
