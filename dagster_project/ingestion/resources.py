@@ -27,7 +27,10 @@ class FastF1Resource(ConfigurableResource):
 
         return FastF1Config.from_env()
 
-    def setup_for_execution(self, context: InitResourceContext):  # pylint: disable=unused-argument
+    def setup_for_execution(
+        self,
+        context: InitResourceContext,
+    ):  # pylint: disable=unused-argument
         """
         Initialize FastF1 cache
         Called automatically by Dagster before job execution.
@@ -127,6 +130,7 @@ class FastF1Resource(ConfigurableResource):
         """
 
         session_object = self.get_session_object(year, grand_prix, session)
+        session_object.load(laps=False, telemetry=False, weather=False, messages=False)
         return session_object.results
 
     def get_session_laps(
