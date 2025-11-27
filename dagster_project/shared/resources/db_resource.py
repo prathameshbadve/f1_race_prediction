@@ -106,21 +106,11 @@ class DatabaseClient:
         if config.connection_string:
             self.connection_string = config.connection_string
         else:
-            if self.backend == DatabaseBackend.SUPABASE.value:
-                # ToDo: Check the connection string format for
-                # Supabase and update accordingly
-                encoded_user = quote_plus(config.user) if config.user else ""
-                encoded_password = (
-                    quote_plus(config.password) if config.password else ""
-                )
-                self.connection_string = f"postgresql://{encoded_user}:{encoded_password}@{config.host}:{config.port}/{config.database}"  # pylint: disable=line-too-long
-            else:
-                # URL-encode credentials to handle special characters
-                encoded_user = quote_plus(config.user) if config.user else ""
-                encoded_password = (
-                    quote_plus(config.password) if config.password else ""
-                )
-                self.connection_string = f"postgresql://{encoded_user}:{encoded_password}@{config.host}:{config.port}/{config.database}"  # pylint: disable=line-too-long
+            # Supabase and Postgres have the same URL structure.
+            # URL-encode credentials to handle special characters
+            encoded_user = quote_plus(config.user) if config.user else ""
+            encoded_password = quote_plus(config.password) if config.password else ""
+            self.connection_string = f"postgresql://{encoded_user}:{encoded_password}@{config.host}:{config.port}/{config.database}"  # pylint: disable=line-too-long
 
         # Create engine with connection pooling
         self.engine = create_engine(
@@ -154,15 +144,6 @@ class DatabaseClient:
         """Factory method to return object configured as per env variables"""
 
         return cls(config=DatabaseConfig.from_env())
-
-    @classmethod
-    def from_custom_config(cls, custom_config: DatabaseConfig):
-        """
-        Factory method to return a class object configured
-        as per the provided configuration
-        """
-
-        return cls(custom_config)
 
     @contextmanager
     def get_session(self) -> Generator[Session, None, None]:

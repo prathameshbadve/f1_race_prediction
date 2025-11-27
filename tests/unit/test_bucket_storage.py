@@ -1,462 +1,934 @@
 """
-Tests for BucketResource and BucketClient
-
-This file demonstrates:
-1. Unit tests for BucketPath
-2. Integration tests with actual MinIO
-3. Mocked tests for S3 operations
-4. Dagster asset tests
+Unit tests for BucketClient
 """
+
+# pylint: disable=protected-access, unused-argument
 
 import io
 from pathlib import Path
-from unittest.mock import Mock, patch, MagicMock
+from unittest.mock import MagicMock, patch
 
-import pytest
 import pandas as pd
+import pytest
 from botocore.exceptions import ClientError
 
-from dagster_project.shared.resources import (
-    BucketClient,
-    BucketResource,
-    BucketPath,
-    SupportedFormats,
-    create_bucket_client,
-)
+from dagster_project.shared.resources import BucketClient, BucketPath
+from src.config.settings import BucketConfig
 
 
-# =============================================================================
-# Unit Tests for BucketPath
-# =============================================================================
-
-
+@pytest.mark.unit
 class TestBucketPath:
-    """Unit tests for BucketPath dataclass."""
+    """Test BucketPath dataclass"""
 
-    def test_bucket_path_to_key(self):
-        """Test converting BucketPath to S3 key."""
+    def test_bucket_path_creation(self):
+        """Test creating a BucketPath"""
 
         path = BucketPath(
-            bucket="f1-data-raw",
-            year="2024",
+            bucket="test-bucket",
+            year=2024,
             grand_prix="Bahrain Grand Prix",
-            session="Practice 1",
-            filename="data.parquet",
+            session="Race",
+            filename="laps.parquet",
         )
-        assert path.to_key() == "2024/Bahrain Grand Prix/Practice 1/data.parquet"
+
+        assert path.bucket == "test-bucket"
+        assert path.year == 2024
+        assert path.grand_prix == "Bahrain Grand Prix"
+        assert path.session == "Race"
+        assert path.filename == "laps.parquet"
+
+    def test_bucket_path_to_key(self):
+        """Test converting BucketPath to object key"""
+
+        path = BucketPath(
+            bucket="test-bucket",
+            year=2024,
+            grand_prix="Bahrain Grand Prix",
+            session="Race",
+            filename="laps.parquet",
+        )
+
+        expected_key = "2024/Bahrain Grand Prix/Race/laps.parquet"
+        assert path.to_key() == expected_key
 
     def test_bucket_path_from_key(self):
-        """Test creating BucketPath from S3 key."""
+        """Test creating BucketPath from object key"""
 
-        key = "2024/Monaco Grand Prix/Qualifying/telemetry.parquet"
-        path = BucketPath.from_key("f1-data-raw", key)
+        key = "2024/Bahrain Grand Prix/Race/laps.parquet"
+        path = BucketPath.from_key("test-bucket", key)
 
-        assert path.bucket == "f1-data-raw"
+        assert path.bucket == "test-bucket"
         assert path.year == "2024"
-        assert path.grand_prix == "Monaco Grand Prix"
-        assert path.session == "Qualifying"
-        assert path.filename == "telemetry.parquet"
+        assert path.grand_prix == "Bahrain Grand Prix"
+        assert path.session == "Race"
+        assert path.filename == "laps.parquet"
 
     def test_bucket_path_from_key_invalid(self):
-        """Test that invalid key format raises error."""
+        """Test creating BucketPath from invalid key"""
 
         with pytest.raises(ValueError, match="Invalid key format"):
-            BucketPath.from_key("bucket", "invalid/key")
-
-    def test_bucket_path_roundtrip(self):
-        """Test that to_key and from_key are inverses."""
-
-        original = BucketPath(
-            bucket="test-bucket",
-            year="2023",
-            grand_prix="British Grand Prix",
-            session="Race",
-            filename="results.csv",
-        )
-
-        key = original.to_key()
-        reconstructed = BucketPath.from_key("test-bucket", key)
-
-        assert original == reconstructed
+            BucketPath.from_key("test-bucket", "invalid/key")
 
 
-# =============================================================================
-# Unit Tests for BucketClient (with mocking)
-# =============================================================================
+@pytest.mark.unit
+class TestBucketClientInit:
+    """Test BucketClient initialization"""
+
+    def test_init_with_config(self, bucket_config_dict: dict):
+        """Test initializing BucketClient with config"""
+
+        config = BucketConfig(**bucket_config_dict)
+        client = BucketClient(config=config)
+
+        assert client.endpoint_url == "http://localhost:9000"
+        assert client.raw_data_bucket == "test-bucket"
+        assert client.is_minio is True
+        assert client.max_retries == 3
+
+    def test_init_from_env(self, mock_env_vars: dict[str, str]):
+        """Test initializing BucketClient from environment"""
+
+        client = BucketClient.from_env()
+
+        assert client.endpoint_url == "http://localhost:9000"
+        assert client.raw_data_bucket == "test-bucket"
+
+    def test_init_custom_retries(self, bucket_config_dict: dict):
+        """Test custom retry configuration"""
+
+        config = BucketConfig(**bucket_config_dict)
+        client = BucketClient(config=config, max_retries=5, retry_delay=2.0)
+
+        assert client.max_retries == 5
+        assert client.retry_delay == 2.0
 
 
-class TestBucketClientUnit:
-    """Unit tests for BucketClient using mocks."""
+@pytest.mark.unit
+class TestBucketClientValidation:
+    """Test BucketClient validation methods"""
 
-    @pytest.fixture
-    def bucket_client(self, mock_s3_client):
-        """Create BucketClient with mocked S3."""
+    def test_validate_file_format_valid(self, bucket_config_dict: dict):
+        """Test validating supported file formats"""
 
-        return BucketClient(
-            endpoint_url="http://localhost:9000",
-            access_key="test",
-            secret_key="test",
-            use_ssl=False,
-        )
+        config = BucketConfig(**bucket_config_dict)
+        client = BucketClient(config=config)
 
-    # pylint: disable=protected-access
-    def test_validate_file_format_supported(self, bucket_client):
-        """Test file format validation for supported formats."""
+        assert client._validate_file_format("data.parquet") is True
+        assert client._validate_file_format("data.csv") is True
+        assert client._validate_file_format("data.json") is True
+        assert client._validate_file_format("data.pkl") is True
 
-        assert bucket_client._validate_file_format("data.parquet") is True
-        assert bucket_client._validate_file_format("data.csv") is True
-        assert bucket_client._validate_file_format("data.json") is True
+    def test_validate_file_format_invalid(self, bucket_config_dict: dict):
+        """Test validating unsupported file formats"""
 
-    def test_validate_file_format_unsupported(self, bucket_client):
-        """Test file format validation for unsupported formats."""
+        config = BucketConfig(**bucket_config_dict)
+        client = BucketClient(config=config)
 
-        assert bucket_client._validate_file_format("data.xlsx") is False
-        assert bucket_client._validate_file_format("data.doc") is False
+        with pytest.raises(ValueError, match="Unsupported file format"):
+            client._validate_file_format("data.xlsx")
 
-    def test_upload_file_success(self, bucket_client, mock_s3_client, tmp_path):
-        """Test successful file upload."""
+        with pytest.raises(ValueError, match="Unsupported file format"):
+            client._validate_file_format("data.pdf")
 
-        # Create a test file
+
+@pytest.mark.unit
+class TestBucketClientUpload:
+    """Test BucketClient upload operations"""
+
+    @patch("dagster_project.shared.resources.bucket_resource.boto3.client")
+    def test_upload_file_from_path(
+        self, mock_boto_client, bucket_config_dict: dict, tmp_path: Path
+    ):
+        """Test uploading file from local path"""
+        # Setup
+        config = BucketConfig(**bucket_config_dict)
+        mock_s3 = MagicMock()
+        mock_boto_client.return_value = mock_s3
+
+        client = BucketClient(config=config)
+        client.s3_client = mock_s3
+
+        # Create test file
         test_file = tmp_path / "test.parquet"
         test_file.write_text("test data")
 
         bucket_path = BucketPath(
-            bucket="test-bucket",
-            year="2024",
-            grand_prix="test",
-            session="test",
+            bucket="test-raw",
+            year=2024,
+            grand_prix="Bahrain",
+            session="Race",
             filename="test.parquet",
         )
 
-        result = bucket_client.upload_file(bucket_path, file_path=test_file)
+        # Execute
+        result = client.upload_file(bucket_path=bucket_path, file_path=test_file)
+
+        # Assert
+        assert result is True
+        mock_s3.upload_file.assert_called_once()
+
+    @patch("dagster_project.shared.resources.bucket_resource.boto3.client")
+    def test_upload_file_from_object(
+        self,
+        mock_boto_client,
+        bucket_config_dict: dict,
+        sample_schedule_df: pd.DataFrame,
+    ):
+        """Test uploading file from file object"""
+        # Setup
+        config = BucketConfig(**bucket_config_dict)
+        mock_s3 = MagicMock()
+        mock_boto_client.return_value = mock_s3
+
+        client = BucketClient(config=config)
+        client.s3_client = mock_s3
+
+        # Create file object
+        buffer = io.BytesIO()
+        sample_schedule_df.to_parquet(buffer, index=False)
+        buffer.seek(0)
+
+        bucket_path = BucketPath(
+            bucket="test-raw",
+            year=2024,
+            grand_prix="Bahrain",
+            session="Race",
+            filename="schedule.parquet",
+        )
+
+        # Execute
+        result = client.upload_file(bucket_path=bucket_path, file_obj=buffer)
+
+        # Assert
+        assert result is True
+        mock_s3.upload_fileobj.assert_called_once()
+
+    @patch("dagster_project.shared.resources.bucket_resource.boto3.client")
+    def test_upload_file_invalid_format(
+        self, mock_boto_client, bucket_config_dict: dict
+    ):
+        """Test uploading file with invalid format"""
+        config = BucketConfig(**bucket_config_dict)
+        mock_s3 = MagicMock()
+        mock_boto_client.return_value = mock_s3
+
+        client = BucketClient(config=config)
+        client.s3_client = mock_s3
+
+        bucket_path = BucketPath(
+            bucket="test-raw",
+            year=2024,
+            grand_prix="Bahrain",
+            session="Race",
+            filename="data.xlsx",
+        )
+
+        result = client.upload_file(
+            bucket_path=bucket_path, file_obj=io.BytesIO(b"test")
+        )
+
+        assert result is False
+        mock_s3.upload_fileobj.assert_not_called()
+
+    @patch("dagster_project.shared.resources.bucket_resource.boto3.client")
+    def test_upload_file_with_metadata(
+        self, mock_boto_client, bucket_config_dict: dict
+    ):
+        """Test uploading file with metadata"""
+        config = BucketConfig(**bucket_config_dict)
+        mock_s3 = MagicMock()
+        mock_boto_client.return_value = mock_s3
+
+        client = BucketClient(config=config)
+        client.s3_client = mock_s3
+
+        bucket_path = BucketPath(
+            bucket="test-raw",
+            year=2024,
+            grand_prix="Bahrain",
+            session="Race",
+            filename="data.parquet",
+        )
+
+        metadata = {"source": "fastf1", "version": "1.0"}
+
+        result = client.upload_file(
+            bucket_path=bucket_path, file_obj=io.BytesIO(b"test"), metadata=metadata
+        )
 
         assert result is True
-        mock_s3_client.upload_file.assert_called_once()
+        call_args = mock_s3.upload_fileobj.call_args
+        assert call_args[1]["ExtraArgs"]["Metadata"] == metadata
 
-    def test_upload_file_unsupported_format(self, bucket_client, tmp_path):
-        """Test upload with unsupported file format."""
+    @patch("dagster_project.shared.resources.bucket_resource.boto3.client")
+    def test_upload_file_using_bucket_name_and_key(
+        self, mock_boto_client, bucket_config_dict: dict, tmp_path: Path
+    ):
+        """Test uploading file using bucket name and object key"""
 
-        test_file = tmp_path / "test.xlsx"
+        # Setup
+        config = BucketConfig(**bucket_config_dict)
+        mock_s3 = MagicMock()
+        mock_boto_client.return_value = mock_s3
+
+        client = BucketClient(config=config)
+        client.s3_client = mock_s3
+
+        # Create test file
+        test_file = tmp_path / "test.parquet"
         test_file.write_text("test data")
 
-        bucket_path = BucketPath(
-            bucket="test-bucket",
-            year="2024",
-            grand_prix="test",
-            session="test",
-            filename="test.xlsx",
+        # Execute
+        result = client.upload_file(
+            bucket_name="test-raw", object_key="test.parquet", file_path=test_file
         )
 
-        result = bucket_client.upload_file(bucket_path, file_path=test_file)
+        # Assert
+        assert result is True
+        mock_s3.upload_file.assert_called_once()
+
+    @patch("dagster_project.shared.resources.bucket_resource.boto3.client")
+    def test_upload_file_failure_from_path_and_object(
+        self,
+        mock_boto_client,
+        bucket_config_dict: dict,
+        tmp_path: Path,
+        sample_schedule_df: pd.DataFrame,
+    ):
+        """Test uploading file from local path"""
+        # Setup
+        config = BucketConfig(**bucket_config_dict)
+        mock_s3 = MagicMock()
+        mock_boto_client.return_value = mock_s3
+
+        client = BucketClient(config=config)
+        client.s3_client = mock_s3
+
+        # Create test file
+        test_file = tmp_path / "test.parquet"
+        test_file.write_text("test data")
+
+        # Create file object
+        buffer = io.BytesIO()
+        sample_schedule_df.to_parquet(buffer, index=False)
+        buffer.seek(0)
+
+        bucket_path = BucketPath(
+            bucket="test-raw",
+            year=2024,
+            grand_prix="Bahrain",
+            session="Race",
+            filename="test.parquet",
+        )
+
+        # Execute
+        result = client.upload_file(
+            bucket_path=bucket_path,
+            file_path=test_file,
+            file_obj=buffer,
+        )
+
+        # Assert
+        assert result is False
+        mock_s3.upload_file.assert_not_called()
+
+    @patch("dagster_project.shared.resources.bucket_resource.boto3.client")
+    def test_upload_file_failure_from_no_path_and_no_object(
+        self,
+        mock_boto_client,
+        bucket_config_dict: dict,
+    ):
+        """Test uploading file from local path"""
+        # Setup
+        config = BucketConfig(**bucket_config_dict)
+        mock_s3 = MagicMock()
+        mock_boto_client.return_value = mock_s3
+
+        client = BucketClient(config=config)
+        client.s3_client = mock_s3
+
+        bucket_path = BucketPath(
+            bucket="test-raw",
+            year=2024,
+            grand_prix="Bahrain",
+            session="Race",
+            filename="test.parquet",
+        )
+
+        # Execute
+        result = client.upload_file(
+            bucket_path=bucket_path,
+            file_path=None,
+            file_obj=None,
+        )
+
+        # Assert
+        assert result is False
+        mock_s3.upload_file.assert_not_called()
+
+
+@pytest.mark.unit
+class TestBucketClientDownload:
+    """Test BucketClient download operations"""
+
+    @patch("dagster_project.shared.resources.bucket_resource.boto3.client")
+    def test_download_file_to_memory(
+        self, mock_boto_client, bucket_config_dict: dict, sample_parquet_bytes: bytes
+    ):
+        """Test downloading file to memory"""
+        config = BucketConfig(**bucket_config_dict)
+        mock_s3 = MagicMock()
+        mock_boto_client.return_value = mock_s3
+
+        # Mock download
+        def mock_download(bucket, key, file_obj):
+            file_obj.write(sample_parquet_bytes)
+
+        mock_s3.download_fileobj.side_effect = mock_download
+
+        client = BucketClient(config=config)
+        client.s3_client = mock_s3
+
+        bucket_path = BucketPath(
+            bucket="test-raw",
+            year=2024,
+            grand_prix="Bahrain",
+            session="Race",
+            filename="data.parquet",
+        )
+
+        result = client.download_file(bucket_path=bucket_path)
+
+        assert result is not None
+        assert isinstance(result, bytes)
+        assert len(result) > 0
+        mock_s3.download_fileobj.assert_called_once()
+
+    @patch("dagster_project.shared.resources.bucket_resource.boto3.client")
+    def test_download_file_to_disk(
+        self, mock_boto_client, bucket_config_dict: dict, tmp_path: Path
+    ):
+        """Test downloading file to local path"""
+        config = BucketConfig(**bucket_config_dict)
+        mock_s3 = MagicMock()
+        mock_boto_client.return_value = mock_s3
+
+        client = BucketClient(config=config)
+        client.s3_client = mock_s3
+
+        bucket_path = BucketPath(
+            bucket="test-raw",
+            year=2024,
+            grand_prix="Bahrain",
+            session="Race",
+            filename="data.parquet",
+        )
+
+        local_path = tmp_path / "downloaded.parquet"
+        result = client.download_file(bucket_path=bucket_path, local_path=local_path)
+
+        assert result is None  # Returns None when saving to disk
+        mock_s3.download_file.assert_called_once()
+
+    @patch("dagster_project.shared.resources.bucket_resource.boto3.client")
+    def test_download_file_not_found(self, mock_boto_client, bucket_config_dict: dict):
+        """Test downloading non-existent file"""
+        config = BucketConfig(**bucket_config_dict)
+        mock_s3 = MagicMock()
+        mock_boto_client.return_value = mock_s3
+
+        # Mock 404 error
+        error = ClientError(
+            {"Error": {"Code": "404", "Message": "Not Found"}}, "download_fileobj"
+        )
+        mock_s3.download_fileobj.side_effect = error
+
+        client = BucketClient(config=config)
+        client.s3_client = mock_s3
+
+        bucket_path = BucketPath(
+            bucket="test-raw",
+            year=2024,
+            grand_prix="Bahrain",
+            session="Race",
+            filename="nonexistent.parquet",
+        )
+
+        result = client.download_file(bucket_path=bucket_path)
+
+        assert result is None
+
+    @patch("dagster_project.shared.resources.bucket_resource.boto3.client")
+    def test_download_file_to_disk_using_bucket_name_and_key(
+        self, mock_boto_client, bucket_config_dict: dict, tmp_path: Path
+    ):
+        """Test downloading file to local path"""
+        config = BucketConfig(**bucket_config_dict)
+        mock_s3 = MagicMock()
+        mock_boto_client.return_value = mock_s3
+
+        client = BucketClient(config=config)
+        client.s3_client = mock_s3
+
+        local_path = tmp_path / "downloaded.parquet"
+        result = client.download_file(
+            bucket_name="test-raw", object_key="data.parquet", local_path=local_path
+        )
+
+        assert result is None  # Returns None when saving to disk
+        mock_s3.download_file.assert_called_once()
+
+
+@pytest.mark.unit
+class TestBucketClientOperations:
+    """Test BucketClient other operations"""
+
+    @patch("dagster_project.shared.resources.bucket_resource.boto3.client")
+    def test_file_exists_true(self, mock_boto_client, bucket_config_dict: dict):
+        """Test checking if file exists (true case)"""
+        config = BucketConfig(**bucket_config_dict)
+        mock_s3 = MagicMock()
+        mock_boto_client.return_value = mock_s3
+
+        mock_s3.head_object.return_value = {"ContentLength": 1024}
+
+        client = BucketClient(config=config)
+        client.s3_client = mock_s3
+
+        bucket_path = BucketPath(
+            bucket="test-raw",
+            year=2024,
+            grand_prix="Bahrain",
+            session="Race",
+            filename="data.parquet",
+        )
+
+        result = client.file_exists(bucket_path=bucket_path)
+
+        assert result is True
+
+    @patch("dagster_project.shared.resources.bucket_resource.boto3.client")
+    def test_file_exists_false(self, mock_boto_client, bucket_config_dict: dict):
+        """Test checking if file exists (false case)"""
+        config = BucketConfig(**bucket_config_dict)
+        mock_s3 = MagicMock()
+        mock_boto_client.return_value = mock_s3
+
+        error = ClientError(
+            {"Error": {"Code": "404", "Message": "Not Found"}}, "head_object"
+        )
+        mock_s3.head_object.side_effect = error
+
+        client = BucketClient(config=config)
+        client.s3_client = mock_s3
+
+        bucket_path = BucketPath(
+            bucket="test-raw",
+            year=2024,
+            grand_prix="Bahrain",
+            session="Race",
+            filename="nonexistent.parquet",
+        )
+
+        result = client.file_exists(bucket_path=bucket_path)
 
         assert result is False
 
-    def test_upload_file_no_source(self, bucket_client):
-        """Test upload without file_path or file_obj."""
+    @patch("dagster_project.shared.resources.bucket_resource.boto3.client")
+    def test_file_exists_true_with_bucket_name_and_key(
+        self, mock_boto_client, bucket_config_dict: dict
+    ):
+        """Test checking if file exists (true case)"""
 
-        bucket_path = BucketPath(
-            bucket="test-bucket",
-            year="2024",
-            grand_prix="test",
-            session="test",
-            filename="test.parquet",
+        config = BucketConfig(**bucket_config_dict)
+        mock_s3 = MagicMock()
+        mock_boto_client.return_value = mock_s3
+
+        mock_s3.head_object.return_value = {"ContentLength": 1024}
+
+        client = BucketClient(config=config)
+        client.s3_client = mock_s3
+
+        result = client.file_exists(
+            bucket_name="test-raw",
+            object_key="data.parquet",
         )
 
-        result = bucket_client.upload_file(bucket_path)
+        assert result is True
 
-        assert result is False
+    @patch("dagster_project.shared.resources.bucket_resource.boto3.client")
+    def test_list_objects(self, mock_boto_client, bucket_config_dict: dict):
+        """Test listing objects in bucket"""
+        config = BucketConfig(**bucket_config_dict)
+        mock_s3 = MagicMock()
+        mock_boto_client.return_value = mock_s3
 
-    def test_file_exists_true(self, bucket_client, mock_s3_client):
-        """Test file_exists when file exists."""
-
-        mock_s3_client.head_object.return_value = {}
-
-        bucket_path = BucketPath(
-            bucket="test-bucket",
-            year="2024",
-            grand_prix="test",
-            session="test",
-            filename="test.parquet",
-        )
-
-        assert bucket_client.file_exists(bucket_path) is True
-
-    def test_file_exists_false(self, bucket_client, mock_s3_client):
-        """Test file_exists when file doesn't exist."""
-
-        error_response = {"Error": {"Code": "404"}}
-        mock_s3_client.head_object.side_effect = ClientError(
-            error_response, "head_object"
-        )
-
-        bucket_path = BucketPath(
-            bucket="test-bucket",
-            year="2024",
-            grand_prix="test",
-            session="test",
-            filename="test.parquet",
-        )
-
-        assert bucket_client.file_exists(bucket_path) is False
-
-    def test_list_objects_success(self, bucket_client, mock_s3_client):
-        """Test listing objects successfully."""
-
-        mock_s3_client.list_objects_v2.return_value = {
+        mock_s3.list_objects_v2.return_value = {
             "Contents": [
-                {"Key": "2024/bahrain/practice1/data.parquet"},
-                {"Key": "2024/bahrain/practice2/data.parquet"},
+                {"Key": "2024/Bahrain/Race/laps.parquet"},
+                {"Key": "2024/Bahrain/Race/results.parquet"},
             ]
         }
 
-        objects = bucket_client.list_objects("test-bucket", prefix="2024/bahrain/")
+        client = BucketClient(config=config)
+        client.s3_client = mock_s3
 
-        assert len(objects) == 2
-        assert "2024/bahrain/practice1/data.parquet" in objects
+        result = client.list_objects("test-raw", prefix="2024/Bahrain/Race/")
 
-    def test_list_objects_empty(self, bucket_client, mock_s3_client):
-        """Test listing objects when no objects exist."""
+        assert result is not None
+        assert len(result) == 2
+        assert "2024/Bahrain/Race/laps.parquet" in result
 
-        mock_s3_client.list_objects_v2.return_value = {}
+    @patch("dagster_project.shared.resources.bucket_resource.boto3.client")
+    def test_delete_file(self, mock_boto_client, bucket_config_dict: dict):
+        """Test deleting file"""
+        config = BucketConfig(**bucket_config_dict)
+        mock_s3 = MagicMock()
+        mock_boto_client.return_value = mock_s3
 
-        objects = bucket_client.list_objects("test-bucket")
+        client = BucketClient(config=config)
+        client.s3_client = mock_s3
 
-        assert objects == []
+        bucket_path = BucketPath(
+            bucket="test-raw",
+            year=2024,
+            grand_prix="Bahrain",
+            session="Race",
+            filename="data.parquet",
+        )
 
-    def test_retry_with_backoff_success(self, bucket_client):
-        """Test retry mechanism succeeds on second attempt."""
+        result = client.delete_file(bucket_path=bucket_path)
 
-        mock_operation = Mock(side_effect=[ClientError({}, "test"), "success"])
+        assert result is True
+        mock_s3.delete_object.assert_called_once()
 
-        result = bucket_client._retry_with_backoff(mock_operation)
+    @patch("dagster_project.shared.resources.bucket_resource.boto3.client")
+    def test_delete_file_using_bucket_name_and_key(
+        self, mock_boto_client, bucket_config_dict: dict
+    ):
+        """Test deleting file"""
+        config = BucketConfig(**bucket_config_dict)
+        mock_s3 = MagicMock()
+        mock_boto_client.return_value = mock_s3
 
-        assert result == "success"
-        assert mock_operation.call_count == 2
+        client = BucketClient(config=config)
+        client.s3_client = mock_s3
 
-    def test_retry_with_backoff_all_fail(self, bucket_client):
-        """Test retry mechanism fails after max attempts."""
+        result = client.delete_file(
+            bucket_name="test-raw",
+            object_key="data.parquet",
+        )
 
-        mock_operation = Mock(side_effect=ClientError({}, "test"))
+        assert result is True
+        mock_s3.delete_object.assert_called_once()
+
+    @patch("dagster_project.shared.resources.bucket_resource.boto3.client")
+    def test_resolve_bucket_and_key_failure_no_args(
+        self,
+        mock_boto_client,
+        bucket_config_dict: dict,
+    ):
+        """Test bucket and key resolution"""
+        # Setup
+        config = BucketConfig(**bucket_config_dict)
+        mock_s3 = MagicMock()
+        mock_boto_client.return_value = mock_s3
+
+        client = BucketClient(config=config)
+        client.s3_client = mock_s3
+
+        with pytest.raises(ValueError, match="Either bucket_path"):
+            client._resolve_bucket_and_key()
+
+    @patch("dagster_project.shared.resources.bucket_resource.boto3.client")
+    def test_resolve_bucket_and_key_failure_all_args(
+        self,
+        mock_boto_client,
+        bucket_config_dict: dict,
+    ):
+        """Test bucket and key resolution"""
+        # Setup
+        config = BucketConfig(**bucket_config_dict)
+        mock_s3 = MagicMock()
+        mock_boto_client.return_value = mock_s3
+
+        client = BucketClient(config=config)
+        client.s3_client = mock_s3
+
+        bucket_path = BucketPath(
+            bucket="test-raw",
+            year=2024,
+            grand_prix="Bahrain",
+            session="Race",
+            filename="data.parquet",
+        )
+
+        with pytest.raises(ValueError, match="Only one of"):
+            client._resolve_bucket_and_key(
+                bucket_path=bucket_path,
+                bucket_name="test-raw",
+                object_key="data.parquet",
+            )
+
+
+@pytest.mark.unit
+class TestBucketClientRetry:
+    """Test BucketClient retry logic"""
+
+    @patch("dagster_project.shared.resources.bucket_resource.boto3.client")
+    def test_retry_success_on_second_attempt(
+        self, mock_boto_client, bucket_config_dict: dict
+    ):
+        """Test successful retry after initial failure"""
+        # Setup
+        config = BucketConfig(**bucket_config_dict)
+        mock_s3 = MagicMock()
+        mock_boto_client.return_value = mock_s3
+
+        # First call fails, second succeeds
+        mock_s3.upload_fileobj.side_effect = [
+            ClientError({"Error": {"Code": "500"}}, "upload"),
+            None,  # Success
+        ]
+
+        client = BucketClient(config=config, max_retries=2, retry_delay=0.1)
+        client.s3_client = mock_s3
+
+        bucket_path = BucketPath(
+            bucket="test-raw",
+            year=2024,
+            grand_prix="Bahrain",
+            session="Race",
+            filename="data.parquet",
+        )
+
+        result = client.upload_file(
+            bucket_path=bucket_path, file_obj=io.BytesIO(b"test")
+        )
+
+        assert result is True
+        assert mock_s3.upload_fileobj.call_count == 2
+
+    @patch("dagster_project.shared.resources.bucket_resource.boto3.client")
+    def test_retry_exhausted(self, mock_boto_client, bucket_config_dict: dict):
+        """Test retry logic when all attempts fail"""
+        config = BucketConfig(**bucket_config_dict)
+        mock_s3 = MagicMock()
+        mock_boto_client.return_value = mock_s3
+
+        # All calls fail
+        mock_s3.upload_fileobj.side_effect = [
+            ClientError({"Error": {"Code": "500"}}, "upload"),
+            ClientError({"Error": {"Code": "500"}}, "upload"),
+            ClientError({"Error": {"Code": "500"}}, "upload"),
+        ]
+
+        client = BucketClient(config=config, max_retries=3, retry_delay=0.1)
+        client.s3_client = mock_s3
+
+        bucket_path = BucketPath(
+            bucket="test-raw",
+            year=2024,
+            grand_prix="Bahrain",
+            session="Race",
+            filename="data.parquet",
+        )
+
+        result = client.upload_file(
+            bucket_path=bucket_path, file_obj=io.BytesIO(b"test")
+        )
+
+        assert result is False
+        assert mock_s3.upload_fileobj.call_count == 3
+
+    @patch("dagster_project.shared.resources.bucket_resource.boto3.client")
+    def test_retry_exhausted_raise_exception(
+        self, mock_boto_client, bucket_config_dict: dict
+    ):
+        """Test retry logic when all attempts fail"""
+        config = BucketConfig(**bucket_config_dict)
+        mock_s3 = MagicMock()
+        mock_boto_client.return_value = mock_s3
+
+        client = BucketClient(config=config, max_retries=3, retry_delay=0.1)
+        client.s3_client = mock_s3
+
+        def mock_operation():
+            raise ClientError({"Error": {"Code": "500"}}, "upload")
 
         with pytest.raises(ClientError):
-            bucket_client._retry_with_backoff(mock_operation)
-
-        assert mock_operation.call_count == bucket_client.max_retries
+            client._retry_with_backoff(mock_operation)
 
 
-# =============================================================================
-# Integration Tests (requires Docker services)
-# =============================================================================
+@pytest.mark.unit
+class TestBucketClientBatch:
+    """Test BucketClient batch operations"""
+
+    @patch("dagster_project.shared.resources.bucket_resource.boto3.client")
+    def test_batch_upload(self, mock_boto_client, bucket_config_dict: dict):
+        """Test batch upload operation"""
+        config = BucketConfig(**bucket_config_dict)
+        mock_s3 = MagicMock()
+        mock_boto_client.return_value = mock_s3
+
+        client = BucketClient(config=config)
+        client.s3_client = mock_s3
+
+        files = [
+            (
+                None,
+                "test-raw",
+                "2024/Bahrain Grand Prix/Race/file1.parquet",
+                None,
+                io.BytesIO(b"data1"),
+            ),
+            (
+                BucketPath("test-raw", 2024, "Bahrain", "Race", "file2.parquet"),
+                None,
+                None,
+                None,
+                io.BytesIO(b"data2"),
+            ),
+        ]
+
+        result = client.batch_upload(files)
+
+        assert len(result) == 2
+        assert all(v is True for v in result.values())
+        assert mock_s3.upload_fileobj.call_count == 2
+
+    @patch("dagster_project.shared.resources.bucket_resource.boto3.client")
+    def test_batch_download(
+        self,
+        mock_boto_client,
+        bucket_config_dict: dict,
+        sample_parquet_bytes: bytes,
+    ):
+        """Test batch upload operation"""
+        config = BucketConfig(**bucket_config_dict)
+        mock_s3 = MagicMock()
+        mock_boto_client.return_value = mock_s3
+
+        # Mock download
+        def mock_download(bucket, key, file_obj):
+            file_obj.write(sample_parquet_bytes)
+
+        mock_s3.download_fileobj.side_effect = mock_download
+
+        client = BucketClient(config=config)
+        client.s3_client = mock_s3
+
+        files = [
+            (
+                None,
+                "test-raw",
+                "2024/Bahrain Grand Prix/Race/file1.parquet",
+                None,
+            ),
+            (
+                BucketPath("test-raw", 2024, "Bahrain", "Race", "file2.parquet"),
+                None,
+                None,
+                None,
+            ),
+        ]
+
+        result = client.batch_download(files)
+
+        assert len(result) == 2
+        assert all(v["status"] is True for v in result.values())
+        assert mock_s3.download_fileobj.call_count == 2
 
 
-@pytest.mark.integration
-class TestBucketClientIntegration:
-    """Integration tests for BucketClient with actual MinIO."""
+class TestBucketClientBuckets:
+    """Test BucketClient bucket creation and deletion"""
 
-    @pytest.fixture(scope="class")
-    def minio_client(self):
-        """Create BucketClient connected to test MinIO instance."""
-        client = create_bucket_client(
-            endpoint_url="http://localhost:9000",
-            access_key="minioadmin",
-            secret_key="minioadmin",
-            use_ssl=False,
-        )
+    @patch("dagster_project.shared.resources.bucket_resource.boto3.client")
+    def test_bucket_creation(
+        self,
+        mock_boto_client,
+        bucket_config_dict: dict,
+    ):
+        """Test bucket creation operation"""
 
-        # Create test bucket
-        client.create_bucket("test-integration-bucket")
+        config = BucketConfig(**bucket_config_dict)
+        mock_s3 = MagicMock()
+        mock_boto_client.return_value = mock_s3
 
-        yield client
+        client = BucketClient(config=config)
+        client.s3_client = mock_s3
 
-        # Cleanup
-        client.delete_bucket("test-integration-bucket", force=True)
+        result = client.create_bucket(bucket_name="test-bucket")
 
-    def test_upload_download_roundtrip(self, minio_client, tmp_path):
-        """Test uploading and downloading a file."""
-        # Create test data
-        df = pd.DataFrame({"lap": [1, 2, 3], "time": [90.1, 89.5, 88.9]})
+        assert result is True
+        mock_s3.create_bucket.assert_called_once()
 
-        # Save locally
-        local_file = tmp_path / "test_data.parquet"
-        df.to_parquet(local_file)
+    @patch("dagster_project.shared.resources.bucket_resource.boto3.client")
+    def test_empty_bucket_deletion(
+        self,
+        mock_boto_client,
+        bucket_config_dict: dict,
+    ):
+        """Test bucket deletion operation"""
 
-        # Upload
-        bucket_path = BucketPath(
-            bucket="test-integration-bucket",
-            year="2024",
-            grand_prix="test",
-            session="test",
-            filename="test_data.parquet",
-        )
+        config = BucketConfig(**bucket_config_dict)
+        mock_s3 = MagicMock()
+        mock_boto_client.return_value = mock_s3
 
-        upload_success = minio_client.upload_file(bucket_path, file_path=local_file)
-        assert upload_success is True
+        client = BucketClient(config=config)
+        client.s3_client = mock_s3
 
-        # Verify file exists
-        assert minio_client.file_exists(bucket_path) is True
+        result = client.delete_bucket(bucket_name="test-bucket", force=False)
 
-        # Download
-        download_path = tmp_path / "downloaded.parquet"
-        downloaded_data = minio_client.download_file(
-            bucket_path, local_path=download_path
-        )
+        assert result is True
+        mock_s3.delete_bucket.assert_called_once()
 
-        # Verify content
-        downloaded_df = pd.read_parquet(download_path)
-        pd.testing.assert_frame_equal(df, downloaded_df)
+    @patch("dagster_project.shared.resources.bucket_resource.boto3.client")
+    def test_non_empty_bucket_deletion(
+        self,
+        mock_boto_client,
+        bucket_config_dict: dict,
+    ):
+        """Test bucket deletion operation"""
 
-    def test_batch_upload_download(self, minio_client, tmp_path):
-        """Test batch upload and download operations."""
-        # Create test files
-        files_to_upload = []
-        for i in range(3):
-            df = pd.DataFrame({"value": [i]})
-            file_path = tmp_path / f"file_{i}.parquet"
-            df.to_parquet(file_path)
+        config = BucketConfig(**bucket_config_dict)
+        mock_s3 = MagicMock()
+        mock_boto_client.return_value = mock_s3
 
-            bucket_path = BucketPath(
-                bucket="test-integration-bucket",
-                year="2024",
-                grand_prix="test",
-                session="test",
-                filename=f"file_{i}.parquet",
-            )
-            files_to_upload.append((bucket_path, file_path))
+        client = BucketClient(config=config)
+        client.s3_client = mock_s3
 
-        # Batch upload
-        results = minio_client.batch_upload(files_to_upload)
+        client.list_objects = MagicMock(return_value=["file1.parquet", "file2.parquet"])
+        client.delete_file = MagicMock(return_value=True)
 
-        assert all(results.values())
-        assert len(results) == 3
+        result = client.delete_bucket(bucket_name="test-bucket", force=True)
 
-    def test_list_objects_integration(self, minio_client, tmp_path):
-        """Test listing objects in MinIO."""
-        # Upload some test files
-        for session in ["practice1", "practice2"]:
-            df = pd.DataFrame({"data": [1, 2, 3]})
-            file_path = tmp_path / f"{session}.parquet"
-            df.to_parquet(file_path)
+        assert result is True
+        mock_s3.delete_bucket.assert_called_once()
 
-            bucket_path = BucketPath(
-                bucket="test-integration-bucket",
-                year="2024",
-                grand_prix="test",
-                session=session,
-                filename="data.parquet",
-            )
-            minio_client.upload_file(bucket_path, file_path=file_path)
+    @patch("dagster_project.shared.resources.bucket_resource.boto3.client")
+    def test_non_empty_bucket_deletion_fail(
+        self,
+        mock_boto_client,
+        bucket_config_dict: dict,
+    ):
+        """Test bucket deletion operation"""
 
-        # List objects
-        objects = minio_client.list_objects(
-            "test-integration-bucket", prefix="2024/test/"
-        )
+        # Setup
+        config = BucketConfig(**bucket_config_dict)
+        mock_s3 = MagicMock()
+        mock_boto_client.return_value = mock_s3
+        mock_s3.list_objects_v2.return_value = {
+            "Contents": [
+                {"Key": "file1.parquet"},
+                {"Key": "file2.parquet"},
+            ]
+        }
 
-        assert len(objects) == 2
-        assert any("practice1" in obj for obj in objects)
-        assert any("practice2" in obj for obj in objects)
+        client = BucketClient(config=config)
+        client.s3_client = mock_s3
 
-    def test_delete_file_integration(self, minio_client, tmp_path):
-        """Test deleting a file from MinIO."""
-        # Upload a file
-        df = pd.DataFrame({"data": [1, 2, 3]})
-        file_path = tmp_path / "delete_test.parquet"
-        df.to_parquet(file_path)
+        result = client.delete_bucket(bucket_name="test-bucket", force=False)
 
-        bucket_path = BucketPath(
-            bucket="test-integration-bucket",
-            year="2024",
-            grand_prix="test",
-            session="test",
-            filename="delete_test.parquet",
-        )
-
-        minio_client.upload_file(bucket_path, file_path=file_path)
-        assert minio_client.file_exists(bucket_path) is True
-
-        # Delete
-        delete_success = minio_client.delete_file(bucket_path)
-        assert delete_success is True
-        assert minio_client.file_exists(bucket_path) is False
-
-
-# =============================================================================
-# Dagster Tests
-# =============================================================================
-
-
-@pytest.mark.dagster
-class TestBucketResourceDagster:
-    """Tests for BucketResource in Dagster context."""
-
-    def test_bucket_resource_configuration(self):
-        """Test BucketResource can be configured properly."""
-        resource = BucketResource(
-            endpoint_url="http://localhost:9000",
-            access_key="test",
-            secret_key="test",
-            region_name="ap-south-1",
-            use_ssl=False,
-        )
-
-        assert resource.endpoint_url == "http://localhost:9000"
-        assert resource.access_key == "test"
-        assert resource.use_ssl is False
-
-    def test_bucket_resource_get_client(self):
-        """Test getting BucketClient from resource."""
-        resource = BucketResource(
-            endpoint_url="http://localhost:9000",
-            access_key="test",
-            secret_key="test",
-            use_ssl=False,
-        )
-
-        client = resource.get_client()
-
-        assert isinstance(client, BucketClient)
-        assert client.endpoint_url == "http://localhost:9000"
-        assert client.is_minio is True
-
-
-# =============================================================================
-# Factory Function Tests
-# =============================================================================
-
-
-def test_create_bucket_client_factory():
-    """Test factory function creates client correctly."""
-    client = create_bucket_client(
-        endpoint_url="http://localhost:9000",
-        access_key="test",
-        secret_key="test",
-        use_ssl=False,
-    )
-
-    assert isinstance(client, BucketClient)
-    assert client.endpoint_url == "http://localhost:9000"
-    assert client.is_minio is True
-
-
-def test_create_bucket_client_s3():
-    """Test factory function for S3 (no endpoint_url)."""
-    client = create_bucket_client(
-        access_key="test",
-        secret_key="test",
-    )
-
-    assert isinstance(client, BucketClient)
-    assert client.endpoint_url is None
-    assert client.is_minio is False
-
-
-# =============================================================================
-# Pytest Configuration
-# =============================================================================
-
-
-def pytest_configure(config):
-    """Configure custom markers."""
-    config.addinivalue_line(
-        "markers", "integration: marks tests as integration tests (require Docker)"
-    )
-    config.addinivalue_line("markers", "dagster: marks tests as Dagster-specific tests")
+        assert result is False
+        mock_s3.delete_bucket.assert_not_called()

@@ -2,6 +2,8 @@
 Resources to be used only in ingestion.
 """
 
+# pylint: disable=broad-except
+
 import logging
 from typing import Optional, Tuple
 
@@ -9,6 +11,7 @@ import fastf1
 import pandas as pd
 from dagster import ConfigurableResource, InitResourceContext
 from fastf1 import Cache
+from fastf1.core import InvalidSessionError
 
 from src.config.logging import get_logger
 from src.config.settings import FastF1Config
@@ -106,10 +109,16 @@ class FastF1Resource(ConfigurableResource):
             - session object
         """
 
-        session_object = fastf1.get_session(
-            year=year, gp=grand_prix, identifier=session
-        )
-        return session_object
+        try:
+            session_object = fastf1.get_session(
+                year=year, gp=grand_prix, identifier=session
+            )
+            return session_object
+
+        except InvalidSessionError as e:
+            error_msg = f"Error while trying to get session object: {str(e)}"
+            self._logger.error(error_msg)
+            raise InvalidSessionError(error_msg) from e
 
     def get_session_results(
         self,
@@ -129,20 +138,23 @@ class FastF1Resource(ConfigurableResource):
             - pd.DataFrame containing the results
         """
 
-        session_object = self.get_session_object(year, grand_prix, session)
-        session_object.load(laps=False, telemetry=False, weather=False, messages=False)
-        return session_object.results
+        try:
+            session_object = self.get_session_object(year, grand_prix, session)
+            session_object.load(
+                laps=False, telemetry=False, weather=False, messages=False
+            )
+            return session_object.results
+
+        except Exception as e:
+            self._logger.error("Failed to get session results: %s", str(e))
+            return None
 
     def get_session_laps(
         self,
         year: int,
         grand_prix: str,
         session: str,
-    ) -> Tuple[
-        Optional[pd.DataFrame],
-        Optional[pd.DataFrame],
-        Optional[pd.DataFrame],
-    ]:
+    ) -> Optional[Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]]:
         """
         Gets the session laps from FastF1 API
 
@@ -155,13 +167,20 @@ class FastF1Resource(ConfigurableResource):
             - pd.DataFrame containing the laps
         """
 
-        session_object = self.get_session_object(year, grand_prix, session)
-        session_object.load(laps=True, telemetry=False, weather=False, messages=False)
-        return (
-            session_object.laps,
-            session_object.session_status,
-            session_object.track_status,
-        )
+        try:
+            session_object = self.get_session_object(year, grand_prix, session)
+            session_object.load(
+                laps=True, telemetry=False, weather=False, messages=False
+            )
+            return (
+                session_object.laps,
+                session_object.session_status,
+                session_object.track_status,
+            )
+
+        except Exception as e:
+            self._logger.error("Failed to get session laps: %s", str(e))
+            return None
 
     def get_session_weather(
         self,
@@ -181,9 +200,16 @@ class FastF1Resource(ConfigurableResource):
             - pd.DataFrame containing the weather
         """
 
-        session_object = self.get_session_object(year, grand_prix, session)
-        session_object.load(laps=False, telemetry=False, weather=True, messages=False)
-        return session_object.weather_data
+        try:
+            session_object = self.get_session_object(year, grand_prix, session)
+            session_object.load(
+                laps=False, telemetry=False, weather=True, messages=False
+            )
+            return session_object.weather_data
+
+        except Exception as e:
+            self._logger.error("Failed to get session weather: %s", str(e))
+            return None
 
     def get_session_messages(
         self,
@@ -203,16 +229,23 @@ class FastF1Resource(ConfigurableResource):
             - pd.DataFrame containing the messages
         """
 
-        session_object = self.get_session_object(year, grand_prix, session)
-        session_object.load(laps=False, telemetry=False, weather=False, messages=True)
-        return session_object.race_control_messages
+        try:
+            session_object = self.get_session_object(year, grand_prix, session)
+            session_object.load(
+                laps=False, telemetry=False, weather=False, messages=True
+            )
+            return session_object.race_control_messages
+
+        except Exception as e:
+            self._logger.error("Failed to get session messages: %s", str(e))
+            return None
 
     def get_session_info(
         self,
         year: int,
         grand_prix: str,
         session: str,
-    ) -> Optional[pd.DataFrame]:
+    ) -> Optional[dict]:
         """
         Gets the session info from FastF1 API
 
@@ -225,15 +258,20 @@ class FastF1Resource(ConfigurableResource):
             - pd.DataFrame containing the weather
         """
 
-        session_object = self.get_session_object(year, grand_prix, session)
-        return session_object.session_info
+        try:
+            session_object = self.get_session_object(year, grand_prix, session)
+            return session_object.session_info
+
+        except Exception as e:
+            self._logger.error("Failed to get session info: %s", str(e))
+            return None
 
     def get_session_telemetry(
         self,
         year: int,
         grand_prix: str,
         session: str,
-    ) -> Tuple[Optional[pd.DataFrame], Optional[pd.DataFrame]]:
+    ) -> Optional[Tuple[pd.DataFrame, pd.DataFrame]]:
         """
         Gets the session telemetry data from FastF1 API
 
@@ -246,6 +284,13 @@ class FastF1Resource(ConfigurableResource):
             - pd.DataFrame containing the telemetry data
         """
 
-        session_object = self.get_session_object(year, grand_prix, session)
-        session_object.load(laps=False, telemetry=True, weather=False, messages=False)
-        return session_object.car_data, session_object.pos_data
+        try:
+            session_object = self.get_session_object(year, grand_prix, session)
+            session_object.load(
+                laps=False, telemetry=True, weather=False, messages=False
+            )
+            return session_object.car_data, session_object.pos_data
+
+        except Exception as e:
+            self._logger.error("Failed to get session telemetry: %s", str(e))
+            return None

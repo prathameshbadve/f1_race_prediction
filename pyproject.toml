@@ -1,3 +1,13 @@
+[project]
+name = "F1-Race-Prediction"
+version = "0.1.0"
+description = "End-to-end data science and engineering project that leverages historic race data to predict the results of future races."
+readme = "README.md"
+requires-python = ">=3.11.4"
+authors = [
+    { name = "Prathamesh Badve", email = "pbadve.96@gmail.com"}
+]
+
 [tool.pytest.ini_options]
 pythonpath = ["."]
 testpaths = ["tests"]
@@ -56,8 +66,8 @@ include = '\.pyi?$'
 [tool.ruff]
 line-length = 88
 target-version = "py311"
-select = ["E", "F", "I", "N", "W"]
-ignore = []
+lint.select = ["E", "F", "I", "N", "W"]
+lint.ignore = []
 
 [tool.mypy]
 python_version = "3.11"
