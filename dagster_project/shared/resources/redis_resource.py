@@ -126,12 +126,6 @@ class RedisClient:
 
         return cls(config=RedisConfig.from_env())
 
-    @classmethod
-    def from_custom_config(cls, custom_config: RedisConfig):
-        """Factory to create RedisClient from custom config"""
-
-        return cls(custom_config)
-
     def _build_key(self, key: str, data_type: Optional[CacheDataType] = None) -> str:
         """
         Build a namespaced cache key.
