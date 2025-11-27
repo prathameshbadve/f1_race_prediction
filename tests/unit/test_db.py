@@ -9,620 +9,968 @@ This file demonstrates:
 5. Batch operation tests
 """
 
-import pytest
+# pylint: disable=protected-access, unused-argument
+
+from unittest.mock import MagicMock, Mock, patch
+
 import pandas as pd
-from unittest.mock import Mock
-from sqlalchemy import text
-from sqlalchemy.exc import OperationalError
+import pytest
+from sqlalchemy import Table
+from sqlalchemy.exc import OperationalError, SQLAlchemyError
+from sqlalchemy.orm import Session
 
-from dagster_project.shared.resources import (
-    DatabaseClient,
-    DatabaseResource,
-    DatabaseBackend,
-    create_database_client,
-    Base,
-)
-
-
-# =============================================================================
-# Unit Tests (with mocking)
-# =============================================================================
+from dagster_project.shared.resources import DatabaseClient
+from src.config.settings import DatabaseConfig
 
 
 @pytest.mark.unit
-class TestDatabaseClientUnit:
-    """Unit tests for DatabaseClient using mocks."""
+class TestDatabaseClientInit:
+    """Test Database Client initialization"""
 
-    @pytest.fixture
-    def mock_engine(self, mocker):
-        """Create a mocked SQLAlchemy engine."""
-        mock = mocker.MagicMock()
-        mocker.patch("sqlalchemy.create_engine", return_value=mock)
-        return mock
+    @patch("dagster_project.shared.resources.db_resource.create_engine")
+    @patch("dagster_project.shared.resources.db_resource.sessionmaker")
+    def test_init_with_config(
+        self, mock_create_engine, mock_sessionmaker, database_config_dict: dict
+    ):
+        """Tets initializing DatabaseClient with config"""
 
-    @pytest.fixture
-    def db_client(self, mock_engine):
-        """Create DatabaseClient with mocked engine."""
-        return DatabaseClient(
-            host="localhost",
-            port=5432,
-            database="test",
-            user="test",
-            password="test",
+        config = DatabaseConfig(**database_config_dict)
+        client = DatabaseClient(config=config)
+
+        assert client.backend.value == "postgresql"
+        assert (
+            client.connection_string
+            == "postgresql://testuser:testpass@localhost:5432/testdb"
+        )
+        assert client.max_retries == 3
+        mock_create_engine.assert_called_once()
+        mock_sessionmaker.assert_called_once()
+
+    @patch("dagster_project.shared.resources.db_resource.create_engine")
+    @patch("dagster_project.shared.resources.db_resource.sessionmaker")
+    def test_init_from_env(
+        self,
+        mock_create_engine,
+        mock_sessionmaker,
+        mock_env_vars: dict[str, str],
+    ):
+        """Tets initializing DatabaseClient from environment"""
+
+        client = DatabaseClient.from_env()
+
+        assert client.backend.value == "postgresql"
+        assert (
+            client.connection_string
+            == "postgresql://testuser:testpass@localhost:5432/testdb"
+        )
+        assert client.retry_delay == 1.0
+        mock_create_engine.assert_called_once()
+        mock_sessionmaker.assert_called_once()
+
+
+@pytest.mark.unit
+class TestDatabaseClientSession:
+    """Test DBClient session management"""
+
+    def test_get_session_yields_session(self, db_client, mock_session):
+        """Test that get_session yields a valid session object."""
+        with db_client.get_session() as session:
+            assert session is mock_session
+
+    def test_get_session_creates_session_from_factory(
+        self, db_client, mock_session_factory
+    ):
+        """Test that get_session calls the session factory."""
+        with db_client.get_session() as _:
+            pass
+
+        mock_session_factory.assert_called_once()
+
+    def test_get_session_commits_on_success(self, db_client, mock_session):
+        """Test that session is committed when no exception occurs."""
+        with db_client.get_session() as session:
+            # Simulate some work
+            session.execute("SELECT 1")
+
+        mock_session.commit.assert_called_once()
+
+    def test_get_session_closes_session_on_success(self, db_client, mock_session):
+        """Test that session is closed after successful execution."""
+        with db_client.get_session() as _:
+            pass
+
+        mock_session.close.assert_called_once()
+
+    def test_get_session_on_exception(self, db_client, mock_session):
+        """Test that session is rolled back when an exception occurs."""
+        with pytest.raises(ValueError):
+            with db_client.get_session() as _:
+                raise ValueError("Test error")
+
+        # Rollback
+        mock_session.rollback.assert_called_once()
+        # Closes
+        mock_session.close.assert_called_once()
+        # No commit
+        mock_session.commit.assert_not_called()
+
+    def test_get_session_logs_error_on_exception(self, db_client):
+        """Test that errors are logged when an exception occurs."""
+        error_message = "Database connection failed"
+
+        with pytest.raises(RuntimeError):
+            with db_client.get_session() as _:
+                raise RuntimeError(error_message)
+
+        db_client.logger.error.assert_called_once()
+        # Verify the error message is included in the log
+        call_args = db_client.logger.error.call_args
+        assert "Session error" in call_args[0][0]
+        assert error_message in str(call_args[0])
+
+    def test_get_session_exception_during_commit(self, db_client, mock_session):
+        """Test handling when commit itself raises an exception."""
+        mock_session.commit.side_effect = SQLAlchemyError("Commit failed")
+
+        with pytest.raises(SQLAlchemyError, match="Commit failed"):
+            with db_client.get_session() as _:
+                pass  # No error in the block, but commit will fail
+
+        # Session should still be closed
+        mock_session.close.assert_called_once()
+
+
+@pytest.mark.unit
+class TestDatabaseClientRetry:
+    """Test DatabaseClient retry logic"""
+
+    @patch("dagster_project.shared.resources.db_resource.create_engine")
+    @patch("dagster_project.shared.resources.db_resource.sessionmaker")
+    @patch("time.sleep")
+    def test_retry_success_on_second_attempt(
+        self,
+        mock_sleep,
+        mock_sessionmaker,
+        mock_create_engine,
+        database_config_dict: dict,
+    ):
+        """Test successful retry after initial failure"""
+        # Setup
+        mock_session = Mock(spec=Session)
+        mock_session_class = Mock(return_value=mock_session)
+        mock_sessionmaker.return_value = mock_session_class
+        mock_engine = Mock()
+        mock_create_engine.return_value = mock_engine
+
+        config = DatabaseConfig(**database_config_dict)
+        client = DatabaseClient(config=config, max_retries=3, retry_delay=0.1)
+
+        mock_operation = MagicMock()
+        # First call fails, second succeeds
+        mock_operation.side_effect = [OperationalError("Error", None, None), "Success"]
+
+        result = client._retry_with_backoff(
+            mock_operation,
         )
 
-    def test_client_initialization(self, db_client):
-        """Test DatabaseClient initialization."""
-        assert db_client.backend == DatabaseBackend.POSTGRESQL
-        assert db_client.max_retries == 3
-        assert db_client.connection_string.startswith("postgresql://")
-
-    def test_connection_string_building(self):
-        """Test connection string is built correctly."""
-        client = DatabaseClient(
-            host="testhost",
-            port=5433,
-            database="testdb",
-            user="testuser",
-            password="testpass",
-        )
-
-        expected = "postgresql://testuser:testpass@testhost:5433/testdb"
-        assert client.connection_string == expected
-
-    def test_supabase_backend(self):
-        """Test Supabase backend configuration."""
-        client = DatabaseClient(
-            host="db.supabase.co",
-            port=5432,
-            database="postgres",
-            user="postgres",
-            password="password",
-            backend=DatabaseBackend.SUPABASE,
-        )
-
-        assert client.backend == DatabaseBackend.SUPABASE
-        assert "db.supabase.co" in client.connection_string
-
-    def test_retry_mechanism_success_on_retry(self, db_client):
-        """Test retry mechanism succeeds on second attempt."""
-        mock_operation = Mock(
-            side_effect=[OperationalError("test", None, None), "success"]
-        )
-
-        result = db_client._retry_with_backoff(mock_operation)
-
-        assert result == "success"
+        assert result == "Success"
         assert mock_operation.call_count == 2
+        mock_sleep.assert_called_once()
 
-    def test_retry_mechanism_all_fail(self, db_client):
-        """Test retry mechanism fails after max attempts."""
-        mock_operation = Mock(side_effect=OperationalError("test", None, None))
+    @patch("dagster_project.shared.resources.db_resource.create_engine")
+    @patch("dagster_project.shared.resources.db_resource.sessionmaker")
+    @patch("time.sleep")
+    def test_retry_all_attempts_fail(
+        self,
+        mock_sleep,
+        mock_sessionmaker,
+        mock_create_engine,
+        database_config_dict: dict,
+    ):
+        """Test when all retry attempts fail"""
+        # Setup
+        mock_session = Mock(spec=Session)
+        mock_session_class = Mock(return_value=mock_session)
+        mock_sessionmaker.return_value = mock_session_class
+        mock_engine = Mock()
+        mock_create_engine.return_value = mock_engine
+
+        config = DatabaseConfig(**database_config_dict)
+        client = DatabaseClient(config=config, max_retries=3, retry_delay=0.1)
+
+        mock_operation = MagicMock()
+        mock_operation.__name__ = "MockOperation"
+        mock_operation.side_effect = [
+            OperationalError("Persistent error", None, None),
+            OperationalError("Persistent error", None, None),
+            OperationalError("Persistent error", None, None),
+        ]
 
         with pytest.raises(OperationalError):
-            db_client._retry_with_backoff(mock_operation)
+            client._retry_with_backoff(
+                mock_operation,
+            )
 
-        assert mock_operation.call_count == db_client.max_retries
+        assert mock_operation.call_count == 3
+        assert mock_sleep.call_count == 2
+
+    @patch("dagster_project.shared.resources.db_resource.create_engine")
+    @patch("dagster_project.shared.resources.db_resource.sessionmaker")
+    @patch("time.sleep")
+    def test_retry_exponential_backoff(
+        self, mock_sleep, mock_sessionmaker, mock_create_engine, database_config_dict
+    ):
+        """Test exponential backoff delay"""
+        # Setup
+        mock_session = Mock(spec=Session)
+        mock_session_class = Mock(return_value=mock_session)
+        mock_sessionmaker.return_value = mock_session_class
+        mock_engine = Mock()
+        mock_create_engine.return_value = mock_engine
+
+        config = DatabaseConfig(**database_config_dict)
+        client = DatabaseClient(config=config, max_retries=4, retry_delay=1.0)
+
+        mock_operation = MagicMock()
+        mock_operation.__name__ = "MockOperation"
+        mock_operation.side_effect = OperationalError("Error", None, None)
+
+        with pytest.raises(OperationalError):
+            client._retry_with_backoff(
+                mock_operation,
+            )
+
+        # Check exponential backoff: 1s, 2s, 4s
+        expected_delays = [1.0, 2.0, 4.0]
+        actual_delays = [call_args[0][0] for call_args in mock_sleep.call_args_list]
+        assert actual_delays == expected_delays
 
 
-# =============================================================================
-# Integration Tests (requires PostgreSQL)
-# =============================================================================
+@pytest.mark.unit
+class TestDatabaseClientConnection:
+    """Test DatabaseClient connection operations"""
+
+    @patch("dagster_project.shared.resources.db_resource.create_engine")
+    @patch("dagster_project.shared.resources.db_resource.sessionmaker")
+    def test_test_connection_success(
+        self, mock_sessionmaker, mock_create_engine, database_config_dict
+    ):
+        """Test successful connection test"""
+        # Setup
+        mock_session = Mock(spec=Session)
+        mock_session_class = Mock(return_value=mock_session)
+        mock_sessionmaker.return_value = mock_session_class
+        mock_engine = Mock()
+        mock_create_engine.return_value = mock_engine
+
+        config = DatabaseConfig(**database_config_dict)
+        client = DatabaseClient(config=config)
+
+        result = client.test_connection()
+
+        assert result is True
+        mock_session.execute.assert_called_once()
+
+    @patch("dagster_project.shared.resources.db_resource.create_engine")
+    @patch("dagster_project.shared.resources.db_resource.sessionmaker")
+    def test_test_connection_failure(
+        self, mock_sessionmaker, mock_create_engine, database_config_dict
+    ):
+        """Test failed connection test"""
+        config = DatabaseConfig(**database_config_dict)
+
+        # Setup
+        mock_session = Mock(spec=Session)
+        mock_session.execute.side_effect = Exception("Connection failed")
+        mock_session_class = Mock(return_value=mock_session)
+        mock_sessionmaker.return_value = mock_session_class
+        mock_engine = Mock()
+        mock_create_engine.return_value = mock_engine
+
+        client = DatabaseClient(config=config)
+
+        result = client.test_connection()
+
+        assert result is False
 
 
-@pytest.mark.integration
-class TestDatabaseClientIntegration:
-    """Integration tests with actual PostgreSQL database."""
+@pytest.mark.unit
+class TestDatabaseClientRawSQL:
+    """Test DatabaseClient raw SQL execution"""
 
-    @pytest.fixture(scope="class")
-    def db_client_integration(self, test_env_vars):
-        """Create DatabaseClient connected to test PostgreSQL."""
-        client = create_database_client(
-            host=test_env_vars["POSTGRES_HOST"],
-            port=int(test_env_vars["POSTGRES_PORT"]),
-            database=test_env_vars["POSTGRES_DB"],
-            user=test_env_vars["POSTGRES_USER"],
-            password=test_env_vars["POSTGRES_PASSWORD"],
+    @patch("dagster_project.shared.resources.db_resource.create_engine")
+    @patch("dagster_project.shared.resources.db_resource.sessionmaker")
+    def test_execute_raw_sql_with_fetch(
+        self, mock_sessionmaker, mock_create_engine, database_config_dict
+    ):
+        """Test executing SQL with fetch"""
+        config = DatabaseConfig(**database_config_dict)
+
+        # Setup
+        mock_result = MagicMock()
+        mock_result.keys.return_value = ["id", "name"]
+        mock_result.fetchall.return_value = [(1, "Test"), (2, "Test2")]
+
+        mock_session = Mock(spec=Session)
+        mock_session.execute.return_value = mock_result
+        mock_session_class = Mock(return_value=mock_session)
+        mock_sessionmaker.return_value = mock_session_class
+        mock_engine = Mock()
+        mock_create_engine.return_value = mock_engine
+
+        client = DatabaseClient(config=config)
+
+        results = client.execute_raw_sql("SELECT * FROM test", fetch=True)
+
+        assert results is not None
+        assert len(results) == 2
+        assert results[0] == {"id": 1, "name": "Test"}
+        assert results[1] == {"id": 2, "name": "Test2"}
+
+    @patch("dagster_project.shared.resources.db_resource.create_engine")
+    @patch("dagster_project.shared.resources.db_resource.sessionmaker")
+    def test_execute_raw_sql_without_fetch(
+        self, mock_sessionmaker, mock_create_engine, database_config_dict
+    ):
+        """Test executing SQL without fetch"""
+        config = DatabaseConfig(**database_config_dict)
+
+        mock_session = Mock(spec=Session)
+        mock_session_class = Mock(return_value=mock_session)
+        mock_sessionmaker.return_value = mock_session_class
+        mock_engine = Mock()
+        mock_create_engine.return_value = mock_engine
+
+        client = DatabaseClient(config=config)
+
+        result = client.execute_raw_sql("INSERT INTO test VALUES (1)", fetch=False)
+
+        assert result is None
+
+    @patch("dagster_project.shared.resources.db_resource.create_engine")
+    @patch("dagster_project.shared.resources.db_resource.sessionmaker")
+    def test_execute_raw_sql_with_params(
+        self, mock_sessionmaker, mock_create_engine, database_config_dict
+    ):
+        """Test executing SQL with parameters"""
+        config = DatabaseConfig(**database_config_dict)
+
+        mock_result = MagicMock()
+        mock_result.keys.return_value = ["id", "year"]
+        mock_result.fetchall.return_value = [(1, 2024)]
+
+        mock_session = Mock(spec=Session)
+        mock_session.execute.return_value = mock_result
+        mock_session_class = Mock(return_value=mock_session)
+        mock_sessionmaker.return_value = mock_session_class
+        mock_engine = Mock()
+        mock_create_engine.return_value = mock_engine
+
+        client = DatabaseClient(config=config)
+
+        results = client.execute_raw_sql(
+            "SELECT * FROM races WHERE year = :year",
+            params={"year": 2024},
         )
 
-        # Create test tables
-        Base.metadata.create_all(client.engine)
+        assert results is not None
+        assert len(results) == 1
 
-        yield client
 
-        # Cleanup
-        Base.metadata.drop_all(client.engine)
+@pytest.mark.unit
+class TestDatabaseClientInsert:
+    """Test DatabaseClient insert operations"""
+
+    @patch("dagster_project.shared.resources.db_resource.create_engine")
+    @patch("dagster_project.shared.resources.db_resource.sessionmaker")
+    @patch("dagster_project.shared.resources.db_resource.Table")
+    def test_insert_single_row(
+        self,
+        mock_table,
+        mock_sessionmaker,
+        mock_create_engine,
+        database_config_dict,
+    ):
+        """Test inserting single row"""
+        config = DatabaseConfig(**database_config_dict)
+
+        mock_session = Mock(spec=Session)
+        mock_session_class = Mock(return_value=mock_session)
+        mock_sessionmaker.return_value = mock_session_class
+        mock_engine = Mock()
+        mock_create_engine.return_value = mock_engine
+
+        client = DatabaseClient(config=config)
+
+        data = {"name": "Bahrain Grand Prix", "year": 2024}
+        result = client.insert("races", data)
+
+        assert result is None  # Returns None when return_ids=False
+        mock_session.execute.assert_called_once()
+
+    @patch("dagster_project.shared.resources.db_resource.create_engine")
+    @patch("dagster_project.shared.resources.db_resource.sessionmaker")
+    @patch("dagster_project.shared.resources.db_resource.Table")
+    def test_insert_multiple_rows(
+        self,
+        mock_table,
+        mock_sessionmaker,
+        mock_create_engine,
+        database_config_dict: dict,
+    ):
+        """Test inserting multiple rows"""
+        config = DatabaseConfig(**database_config_dict)
+
+        mock_session = Mock(spec=Session)
+        mock_session_class = Mock(return_value=mock_session)
+        mock_sessionmaker.return_value = mock_session_class
+        mock_engine = Mock()
+        mock_create_engine.return_value = mock_engine
+
+        client = DatabaseClient(config=config)
+
+        data = [
+            {"name": "Bahrain", "year": 2024},
+            {"name": "Saudi Arabia", "year": 2024},
+        ]
+        result = client.insert("races", data)
+
+        assert result is None
+        mock_session.execute.assert_called_once()
+
+
+@pytest.mark.unit
+class TestDatabaseClientBulkInsert:
+    """Test DatabaseClient bulk insert operations"""
+
+    @patch("dagster_project.shared.resources.db_resource.create_engine")
+    @patch("dagster_project.shared.resources.db_resource.sessionmaker")
+    @patch("dagster_project.shared.resources.db_resource.Table")
+    def test_bulk_insert_success(
+        self,
+        mock_table,
+        mock_sessionmaker,
+        mock_create_engine,
+        database_config_dict: dict,
+    ):
+        """Test successful bulk insert"""
+        config = DatabaseConfig(**database_config_dict)
+
+        mock_session = Mock(spec=Session)
+        mock_session_class = Mock(return_value=mock_session)
+        mock_sessionmaker.return_value = mock_session_class
+        mock_engine = Mock()
+        mock_create_engine.return_value = mock_engine
+
+        client = DatabaseClient(config=config)
+
+        data = [
+            {"lap": 1, "time": 90.123},
+            {"lap": 2, "time": 89.456},
+            {"lap": 3, "time": 88.789},
+        ]
+        result = client.bulk_insert("lap_times", data)
+
+        assert result is True
+        mock_session.execute.assert_called_once()
+
+    @patch("dagster_project.shared.resources.db_resource.create_engine")
+    @patch("dagster_project.shared.resources.db_resource.sessionmaker")
+    def test_bulk_insert_empty_data(
+        self,
+        mock_sessionmaker,
+        mock_create_engine,
+        database_config_dict: dict,
+    ):
+        """Test bulk insert with empty data"""
+        config = DatabaseConfig(**database_config_dict)
+        client = DatabaseClient(config=config)
+
+        result = client.bulk_insert("lap_times", [])
+
+        assert result is False
+
+
+@pytest.mark.unit
+class TestDatabaseClientUpsert:
+    """Test DatabaseClient upsert operations"""
+
+    @patch("dagster_project.shared.resources.db_resource.create_engine")
+    @patch("dagster_project.shared.resources.db_resource.sessionmaker")
+    @patch("dagster_project.shared.resources.db_resource.Table")
+    def test_upsert_single_row(
+        self,
+        mock_table,
+        mock_sessionmaker,
+        mock_create_engine,
+        database_config_dict: dict,
+    ):
+        """Test upserting single row"""
+        config = DatabaseConfig(**database_config_dict)
+
+        mock_session = Mock(spec=Session)
+        mock_session_class = Mock(return_value=mock_session)
+        mock_sessionmaker.return_value = mock_session_class
+        mock_engine = Mock()
+        mock_create_engine.return_value = mock_engine
+
+        # Mock table
+        mock_table_instance = MagicMock(spec=Table)
+        mock_table_instance.columns = [
+            MagicMock(name="driver_id"),
+            MagicMock(name="team"),
+        ]
+        mock_table.return_value = mock_table_instance
+
+        client = DatabaseClient(config=config)
+
+        data = {"driver_id": "VER", "team": "Red Bull Racing"}
+        result = client.upsert(
+            "drivers",
+            data,
+            conflict_columns=["driver_id"],
+            update_columns=["team"],
+        )
+
+        assert result is True
+        mock_session.execute.assert_called_once()
+
+    @patch("dagster_project.shared.resources.db_resource.create_engine")
+    @patch("dagster_project.shared.resources.db_resource.sessionmaker")
+    @patch("dagster_project.shared.resources.db_resource.Table")
+    def test_upsert_multiple_rows(
+        self, mock_table, mock_sessionmaker, mock_create_engine, database_config_dict
+    ):
+        """Test upserting multiple rows"""
+        config = DatabaseConfig(**database_config_dict)
+
+        mock_session = Mock(spec=Session)
+        mock_session_class = Mock(return_value=mock_session)
+        mock_sessionmaker.return_value = mock_session_class
+        mock_engine = Mock()
+        mock_create_engine.return_value = mock_engine
+
+        # Create mock columns with proper name attributes
+        mock_col_driver_id = MagicMock()
+        mock_col_driver_id.name = "driver_id"
+        mock_col_driver_id.key = "driver_id"
+
+        mock_col_team = MagicMock()
+        mock_col_team.name = "team"
+        mock_col_team.key = "team"
+
+        mock_col_points = MagicMock()
+        mock_col_points.name = "points"
+        mock_col_points.key = "points"
+
+        mock_table_instance = MagicMock(spec=Table)
+        mock_table_instance.columns = [
+            mock_col_driver_id,
+            mock_col_team,
+            mock_col_points,
+        ]
+
+        # Also set up c accessor which SQLAlchemy uses for column access
+        mock_table_instance.c = MagicMock()
+        mock_table_instance.c.driver_id = mock_col_driver_id
+        mock_table_instance.c.team = mock_col_team
+        mock_table_instance.c.points = mock_col_points
+
+        mock_table.return_value = mock_table_instance
+
+        client = DatabaseClient(config=config)
+
+        data = [
+            {"driver_id": "VER", "team": "Red Bull", "points": "25"},
+            {"driver_id": "HAM", "team": "Mercedes", "points": "18"},
+        ]
+        result = client.upsert(
+            "drivers",
+            data,
+            conflict_columns=["driver_id"],
+        )
+
+        assert result is True
+
+
+@pytest.mark.unit
+class TestDatabaseClientQuery:
+    """Test DatabaseClient query operations"""
+
+    @patch("dagster_project.shared.resources.db_resource.create_engine")
+    @patch("dagster_project.shared.resources.db_resource.sessionmaker")
+    @patch("dagster_project.shared.resources.db_resource.Table")
+    def test_query_all_columns(
+        self,
+        mock_table,
+        mock_sessionmaker,
+        mock_create_engine,
+        database_config_dict: dict,
+    ):
+        """Test querying all columns"""
+        config = DatabaseConfig(**database_config_dict)
+
+        mock_result = MagicMock()
+        mock_result.keys.return_value = ["id", "name", "year"]
+        mock_result.fetchall.return_value = [(1, "Bahrain", 2024)]
+
+        mock_session = Mock(spec=Session)
+        mock_session.execute.return_value = mock_result
+        mock_session_class = Mock(return_value=mock_session)
+        mock_sessionmaker.return_value = mock_session_class
+        mock_engine = Mock()
+        mock_create_engine.return_value = mock_engine
+
+        client = DatabaseClient(config=config)
+
+        results = client.query("races")
+
+        assert results is not None
+        assert len(results) == 1
+        assert results[0] == {"id": 1, "name": "Bahrain", "year": 2024}
+
+    @patch("dagster_project.shared.resources.db_resource.create_engine")
+    @patch("dagster_project.shared.resources.db_resource.sessionmaker")
+    @patch("dagster_project.shared.resources.db_resource.Table")
+    def test_query_specific_columns(
+        self,
+        mock_table,
+        mock_sessionmaker,
+        mock_create_engine,
+        database_config_dict: dict,
+    ):
+        """Test querying specific columns"""
+        config = DatabaseConfig(**database_config_dict)
+
+        mock_result = MagicMock()
+        mock_result.keys.return_value = ["name", "year"]
+        mock_result.fetchall.return_value = [("Bahrain", 2024)]
+
+        mock_session = Mock(spec=Session)
+        mock_session.execute.return_value = mock_result
+        mock_session_class = Mock(return_value=mock_session)
+        mock_sessionmaker.return_value = mock_session_class
+        mock_engine = Mock()
+        mock_create_engine.return_value = mock_engine
+
+        client = DatabaseClient(config=config)
+
+        results = client.query("races", columns=["name", "year"])
+
+        assert results is not None
+        assert results[0] == {"name": "Bahrain", "year": 2024}
+
+    @patch("dagster_project.shared.resources.db_resource.create_engine")
+    @patch("dagster_project.shared.resources.db_resource.sessionmaker")
+    @patch("dagster_project.shared.resources.db_resource.Table")
+    def test_query_with_filters(
+        self,
+        mock_table,
+        mock_sessionmaker,
+        mock_create_engine,
+        database_config_dict: dict,
+    ):
+        """Test querying with filters"""
+        config = DatabaseConfig(**database_config_dict)
+
+        mock_result = MagicMock()
+        mock_result.keys.return_value = ["name"]
+        mock_result.fetchall.return_value = [("Bahrain",)]
+
+        mock_session = Mock(spec=Session)
+        mock_session.execute.return_value = mock_result
+        mock_session_class = Mock(return_value=mock_session)
+        mock_sessionmaker.return_value = mock_session_class
+        mock_engine = Mock()
+        mock_create_engine.return_value = mock_engine
+
+        client = DatabaseClient(config=config)
+
+        results = client.query("races", filters={"year": 2024})
+
+        assert results is not None
+
+    @patch("dagster_project.shared.resources.db_resource.create_engine")
+    @patch("dagster_project.shared.resources.db_resource.sessionmaker")
+    @patch("dagster_project.shared.resources.db_resource.Table")
+    def test_query_with_limit(
+        self,
+        mock_table,
+        mock_sessionmaker,
+        mock_create_engine,
+        database_config_dict: dict,
+    ):
+        """Test querying with limit"""
+        config = DatabaseConfig(**database_config_dict)
+
+        mock_result = MagicMock()
+        mock_result.keys.return_value = ["name"]
+        mock_result.fetchall.return_value = [("Bahrain",), ("Saudi Arabia",)]
+
+        mock_session = Mock(spec=Session)
+        mock_session.execute.return_value = mock_result
+        mock_session_class = Mock(return_value=mock_session)
+        mock_sessionmaker.return_value = mock_session_class
+        mock_engine = Mock()
+        mock_create_engine.return_value = mock_engine
+
+        client = DatabaseClient(config=config)
+
+        results = client.query("races", limit=2)
+
+        assert results is not None
+        assert len(results) == 2
+
+
+@pytest.mark.unit
+class TestDatabaseClientDataFrame:
+    """Test DatabaseClient DataFrame operations"""
+
+    @patch("dagster_project.shared.resources.db_resource.create_engine")
+    @patch("dagster_project.shared.resources.db_resource.sessionmaker")
+    @patch("dagster_project.shared.resources.db_resource.Table")
+    def test_query_to_dataframe(
+        self,
+        mock_table,
+        mock_sessionmaker,
+        mock_create_engine,
+        database_config_dict: dict,
+    ):
+        """Test querying to DataFrame"""
+        config = DatabaseConfig(**database_config_dict)
+
+        mock_result = MagicMock()
+        mock_result.keys.return_value = ["name", "year"]
+        mock_result.fetchall.return_value = [("Bahrain", 2024), ("Saudi Arabia", 2024)]
+
+        mock_session = Mock(spec=Session)
+        mock_session.execute.return_value = mock_result
+        mock_session_class = Mock(return_value=mock_session)
+        mock_sessionmaker.return_value = mock_session_class
+        mock_engine = Mock()
+        mock_create_engine.return_value = mock_engine
+
+        client = DatabaseClient(config=config)
+
+        df = client.query_to_dataframe("races")
+
+        assert df is not None
+        assert isinstance(df, pd.DataFrame)
+        assert len(df) == 2
+        assert list(df.columns) == ["name", "year"]
+
+    @patch("dagster_project.shared.resources.db_resource.create_engine")
+    @patch("dagster_project.shared.resources.db_resource.sessionmaker")
+    def test_create_table_from_dataframe(
+        self,
+        mock_sessionmaker,
+        mock_create_engine,
+        database_config_dict: dict,
+        sample_schedule_df: pd.DataFrame,
+    ):
+        """Test creating table from DataFrame"""
+        config = DatabaseConfig(**database_config_dict)
+
+        # Mock the to_sql method
+        with patch.object(pd.DataFrame, "to_sql") as mock_to_sql:
+            client = DatabaseClient(config=config)
+
+            result = client.create_table_from_dataframe(
+                "test_table", sample_schedule_df
+            )
+
+            assert result is True
+            mock_to_sql.assert_called_once()
+
+    @patch("dagster_project.shared.resources.db_resource.create_engine")
+    @patch("dagster_project.shared.resources.db_resource.sessionmaker")
+    def test_dataframe_to_sql(
+        self,
+        mock_sessionmaker,
+        mock_create_engine,
+        database_config_dict: dict,
+        sample_schedule_df: pd.DataFrame,
+    ):
+        """Test writing DataFrame to SQL"""
+        config = DatabaseConfig(**database_config_dict)
+
+        with patch.object(pd.DataFrame, "to_sql") as mock_to_sql:
+            client = DatabaseClient(config=config)
+
+            result = client.dataframe_to_sql(sample_schedule_df, "races")
+
+            assert result is True
+            mock_to_sql.assert_called_once()
+            call_kwargs = mock_to_sql.call_args[1]
+            assert call_kwargs["if_exists"] == "append"
+            assert call_kwargs["chunksize"] == 1000
+
+
+@pytest.mark.unit
+class TestDatabaseClientUpdate:
+    """Test DatabaseClient update operations"""
+
+    @patch("dagster_project.shared.resources.db_resource.create_engine")
+    @patch("dagster_project.shared.resources.db_resource.sessionmaker")
+    @patch("dagster_project.shared.resources.db_resource.Table")
+    def test_update_rows(
+        self,
+        mock_table,
+        mock_sessionmaker,
+        mock_create_engine,
+        database_config_dict: dict,
+    ):
+        """Test updating rows"""
+        config = DatabaseConfig(**database_config_dict)
+
+        mock_result = MagicMock()
+        mock_result.rowcount = 1
+
+        mock_session = Mock(spec=Session)
+        mock_session.execute.return_value = mock_result
+        mock_session_class = Mock(return_value=mock_session)
+        mock_sessionmaker.return_value = mock_session_class
+        mock_engine = Mock()
+        mock_create_engine.return_value = mock_engine
+
+        client = DatabaseClient(config=config)
+
+        count = client.update("drivers", {"team": "Ferrari"}, {"driver_id": "SAI"})
+
+        assert count == 1
+        mock_session.execute.assert_called_once()
+
+
+@pytest.mark.unit
+class TestDatabaseClientDelete:
+    """Test DatabaseClient delete operations"""
+
+    @patch("dagster_project.shared.resources.db_resource.create_engine")
+    @patch("dagster_project.shared.resources.db_resource.sessionmaker")
+    @patch("dagster_project.shared.resources.db_resource.Table")
+    def test_delete_rows(
+        self,
+        mock_table,
+        mock_sessionmaker,
+        mock_create_engine,
+        database_config_dict: dict,
+    ):
+        """Test deleting rows"""
+        config = DatabaseConfig(**database_config_dict)
+
+        mock_result = MagicMock()
+        mock_result.rowcount = 2
+
+        mock_session = Mock(spec=Session)
+        mock_session.execute.return_value = mock_result
+        mock_session_class = Mock(return_value=mock_session)
+        mock_sessionmaker.return_value = mock_session_class
+        mock_engine = Mock()
+        mock_create_engine.return_value = mock_engine
+
+        client = DatabaseClient(config=config)
+
+        count = client.delete("lap_times", {"session_id": "old_session"})
+
+        assert count == 2
+        mock_session.execute.assert_called_once()
+
+
+@pytest.mark.unit
+class TestDatabaseClientUtility:
+    """Test DatabaseClient utility methods"""
+
+    @patch("dagster_project.shared.resources.db_resource.create_engine")
+    @patch("dagster_project.shared.resources.db_resource.sessionmaker")
+    @patch("dagster_project.shared.resources.db_resource.inspect")
+    def test_table_exists_true(
+        self,
+        mock_inspect,
+        mock_sessionmaker,
+        mock_create_engine,
+        database_config_dict: dict,
+    ):
+        """Test checking if table exists (true)"""
+        config = DatabaseConfig(**database_config_dict)
+
+        mock_inspector = MagicMock()
+        mock_inspector.get_table_names.return_value = ["races", "drivers", "laps"]
+        mock_inspect.return_value = mock_inspector
+
+        client = DatabaseClient(config=config)
+
+        result = client.table_exists("races")
+
+        assert result is True
+
+    @patch("dagster_project.shared.resources.db_resource.create_engine")
+    @patch("dagster_project.shared.resources.db_resource.sessionmaker")
+    @patch("dagster_project.shared.resources.db_resource.inspect")
+    def test_table_exists_false(
+        self,
+        mock_inspect,
+        mock_sessionmaker,
+        mock_create_engine,
+        database_config_dict: dict,
+    ):
+        """Test checking if table exists (false)"""
+        config = DatabaseConfig(**database_config_dict)
+
+        mock_inspector = MagicMock()
+        mock_inspector.get_table_names.return_value = ["races", "drivers"]
+        mock_inspect.return_value = mock_inspector
+
+        client = DatabaseClient(config=config)
+
+        result = client.table_exists("nonexistent")
+
+        assert result is False
+
+    @patch("dagster_project.shared.resources.db_resource.create_engine")
+    @patch("dagster_project.shared.resources.db_resource.sessionmaker")
+    @patch("dagster_project.shared.resources.db_resource.inspect")
+    def test_get_table_columns(
+        self,
+        mock_inspect,
+        mock_sessionmaker,
+        mock_create_engine,
+        database_config_dict: dict,
+    ):
+        """Test getting table columns"""
+        config = DatabaseConfig(**database_config_dict)
+
+        mock_inspector = MagicMock()
+        mock_inspector.get_columns.return_value = [
+            {"name": "id", "type": "INTEGER"},
+            {"name": "name", "type": "VARCHAR"},
+            {"name": "year", "type": "INTEGER"},
+        ]
+        mock_inspect.return_value = mock_inspector
+
+        client = DatabaseClient(config=config)
+
+        columns = client.get_table_columns("races")
+
+        assert columns == ["id", "name", "year"]
+
+
+@pytest.mark.unit
+class TestDatabaseClientClose:
+    """Test DatabaseClient close operation"""
+
+    @patch("dagster_project.shared.resources.db_resource.create_engine")
+    @patch("dagster_project.shared.resources.db_resource.sessionmaker")
+    def test_close(self, mock_sessionmaker, mock_create_engine, database_config_dict):
+        """Test closing database connections"""
+        config = DatabaseConfig(**database_config_dict)
+
+        mock_session = Mock(spec=Session)
+        mock_session_class = Mock(return_value=mock_session)
+        mock_sessionmaker.return_value = mock_session_class
+        mock_engine = Mock()
+        mock_create_engine.return_value = mock_engine
+
+        client = DatabaseClient(config=config)
         client.close()
 
-    @pytest.fixture
-    def clean_tables(self, db_client_integration):
-        """Clean all tables before each test."""
-        yield
-
-        # Cleanup after test
-        with db_client_integration.get_session() as session:
-            for table in reversed(Base.metadata.sorted_tables):
-                session.execute(table.delete())
-
-    def test_connection(self, db_client_integration):
-        """Test database connection."""
-        assert db_client_integration.test_connection()
-
-    def test_table_exists(self, db_client_integration):
-        """Test checking if table exists."""
-        # Create a test table
-        with db_client_integration.get_session() as session:
-            session.execute(
-                text("""
-                CREATE TABLE IF NOT EXISTS test_table (
-                    id SERIAL PRIMARY KEY,
-                    name VARCHAR(100)
-                )
-            """)
-            )
-
-        assert db_client_integration.table_exists("test_table")
-        assert not db_client_integration.table_exists("nonexistent_table")
-
-        # Cleanup
-        with db_client_integration.get_session() as session:
-            session.execute(text("DROP TABLE IF EXISTS test_table"))
-
-    def test_get_table_columns(self, db_client_integration):
-        """Test getting table columns."""
-        # Create test table
-        with db_client_integration.get_session() as session:
-            session.execute(
-                text("""
-                CREATE TABLE IF NOT EXISTS test_columns (
-                    id SERIAL PRIMARY KEY,
-                    name VARCHAR(100),
-                    value INTEGER
-                )
-            """)
-            )
-
-        columns = db_client_integration.get_table_columns("test_columns")
-
-        assert "id" in columns
-        assert "name" in columns
-        assert "value" in columns
-
-        # Cleanup
-        with db_client_integration.get_session() as session:
-            session.execute(text("DROP TABLE IF EXISTS test_columns"))
-
-    def test_insert_and_query(self, db_client_integration, clean_tables):
-        """Test inserting and querying data."""
-        # Create table
-        with db_client_integration.get_session() as session:
-            session.execute(
-                text("""
-                CREATE TABLE IF NOT EXISTS test_races (
-                    id SERIAL PRIMARY KEY,
-                    name VARCHAR(100),
-                    year INTEGER
-                )
-            """)
-            )
-
-        # Insert data
-        data = {"name": "Bahrain GP", "year": 2024}
-        result = db_client_integration.insert("test_races", data)
-
-        # Query data
-        results = db_client_integration.query("test_races", filters={"year": 2024})
-
-        assert len(results) == 1
-        assert results[0]["name"] == "Bahrain GP"
-        assert results[0]["year"] == 2024
-
-        # Cleanup
-        with db_client_integration.get_session() as session:
-            session.execute(text("DROP TABLE IF EXISTS test_races"))
-
-    def test_bulk_insert(self, db_client_integration, clean_tables):
-        """Test bulk insert operation."""
-        # Create table
-        with db_client_integration.get_session() as session:
-            session.execute(
-                text("""
-                CREATE TABLE IF NOT EXISTS test_laps (
-                    id SERIAL PRIMARY KEY,
-                    driver VARCHAR(3),
-                    lap_time FLOAT
-                )
-            """)
-            )
-
-        # Bulk insert
-        data = [
-            {"driver": "VER", "lap_time": 88.123},
-            {"driver": "HAM", "lap_time": 88.456},
-            {"driver": "LEC", "lap_time": 88.789},
-        ]
-
-        success = db_client_integration.bulk_insert("test_laps", data)
-        assert success
-
-        # Verify
-        results = db_client_integration.query("test_laps")
-        assert len(results) == 3
-
-        # Cleanup
-        with db_client_integration.get_session() as session:
-            session.execute(text("DROP TABLE IF EXISTS test_laps"))
-
-    def test_update(self, db_client_integration, clean_tables):
-        """Test update operation."""
-        # Create and populate table
-        with db_client_integration.get_session() as session:
-            session.execute(
-                text("""
-                CREATE TABLE IF NOT EXISTS test_drivers (
-                    id SERIAL PRIMARY KEY,
-                    code VARCHAR(3),
-                    team VARCHAR(50)
-                )
-            """)
-            )
-            session.execute(
-                text("""
-                INSERT INTO test_drivers (code, team) VALUES 
-                ('VER', 'Red Bull'),
-                ('HAM', 'Mercedes')
-            """)
-            )
-
-        # Update
-        count = db_client_integration.update(
-            "test_drivers", {"team": "Ferrari"}, {"code": "HAM"}
-        )
-
-        assert count == 1
-
-        # Verify
-        results = db_client_integration.query("test_drivers", filters={"code": "HAM"})
-        assert results[0]["team"] == "Ferrari"
-
-        # Cleanup
-        with db_client_integration.get_session() as session:
-            session.execute(text("DROP TABLE IF EXISTS test_drivers"))
-
-    def test_delete(self, db_client_integration, clean_tables):
-        """Test delete operation."""
-        # Create and populate table
-        with db_client_integration.get_session() as session:
-            session.execute(
-                text("""
-                CREATE TABLE IF NOT EXISTS test_delete (
-                    id SERIAL PRIMARY KEY,
-                    name VARCHAR(50)
-                )
-            """)
-            )
-            session.execute(
-                text("""
-                INSERT INTO test_delete (name) VALUES 
-                ('keep'),
-                ('delete1'),
-                ('delete2')
-            """)
-            )
-
-        # Delete
-        count = db_client_integration.delete("test_delete", {"name": "delete1"})
-
-        assert count == 1
-
-        # Verify
-        results = db_client_integration.query("test_delete")
-        assert len(results) == 2
-        assert all(r["name"] != "delete1" for r in results)
-
-        # Cleanup
-        with db_client_integration.get_session() as session:
-            session.execute(text("DROP TABLE IF EXISTS test_delete"))
-
-    def test_upsert(self, db_client_integration, clean_tables):
-        """Test upsert operation."""
-        # Create table
-        with db_client_integration.get_session() as session:
-            session.execute(
-                text("""
-                CREATE TABLE IF NOT EXISTS test_upsert (
-                    driver_code VARCHAR(3) PRIMARY KEY,
-                    team VARCHAR(50),
-                    points INTEGER
-                )
-            """)
-            )
-
-        # Initial insert
-        data = [
-            {"driver_code": "VER", "team": "Red Bull", "points": 100},
-            {"driver_code": "HAM", "team": "Mercedes", "points": 80},
-        ]
-
-        db_client_integration.bulk_insert("test_upsert", data)
-
-        # Upsert (update VER, insert LEC)
-        upsert_data = [
-            {"driver_code": "VER", "team": "Red Bull", "points": 125},  # Update
-            {"driver_code": "LEC", "team": "Ferrari", "points": 75},  # Insert
-        ]
-
-        success = db_client_integration.upsert(
-            "test_upsert",
-            upsert_data,
-            conflict_columns=["driver_code"],
-            update_columns=["points"],
-        )
-
-        assert success
-
-        # Verify
-        results = db_client_integration.query("test_upsert", order_by="driver_code")
-        assert len(results) == 3
-
-        ver_result = next(r for r in results if r["driver_code"] == "VER")
-        assert ver_result["points"] == 125  # Updated
-
-        lec_result = next(r for r in results if r["driver_code"] == "LEC")
-        assert lec_result["points"] == 75  # Inserted
-
-        # Cleanup
-        with db_client_integration.get_session() as session:
-            session.execute(text("DROP TABLE IF EXISTS test_upsert"))
-
-    def test_query_to_dataframe(self, db_client_integration, clean_tables):
-        """Test querying data to DataFrame."""
-        # Create and populate table
-        with db_client_integration.get_session() as session:
-            session.execute(
-                text("""
-                CREATE TABLE IF NOT EXISTS test_df (
-                    id SERIAL PRIMARY KEY,
-                    value INTEGER
-                )
-            """)
-            )
-            session.execute(
-                text("""
-                INSERT INTO test_df (value) VALUES (1), (2), (3), (4), (5)
-            """)
-            )
-
-        # Query to DataFrame
-        df = db_client_integration.query_to_dataframe("test_df")
-
-        assert isinstance(df, pd.DataFrame)
-        assert len(df) == 5
-        assert "value" in df.columns
-
-        # Cleanup
-        with db_client_integration.get_session() as session:
-            session.execute(text("DROP TABLE IF EXISTS test_df"))
-
-    def test_dataframe_to_sql(self, db_client_integration, clean_tables):
-        """Test writing DataFrame to SQL."""
-        # Create DataFrame
-        df = pd.DataFrame({"driver": ["VER", "HAM", "LEC"], "points": [100, 80, 70]})
-
-        # Write to SQL
-        success = db_client_integration.dataframe_to_sql(
-            df, "test_df_insert", if_exists="replace"
-        )
-
-        assert success
-
-        # Verify
-        result_df = db_client_integration.query_to_dataframe("test_df_insert")
-        assert len(result_df) == 3
-
-        pd.testing.assert_frame_equal(
-            df.sort_values("driver").reset_index(drop=True),
-            result_df.sort_values("driver").reset_index(drop=True),
-        )
-
-        # Cleanup
-        with db_client_integration.get_session() as session:
-            session.execute(text("DROP TABLE IF EXISTS test_df_insert"))
-
-    def test_execute_raw_sql(self, db_client_integration, clean_tables):
-        """Test executing raw SQL."""
-        # Create and populate table
-        with db_client_integration.get_session() as session:
-            session.execute(
-                text("""
-                CREATE TABLE IF NOT EXISTS test_raw_sql (
-                    id SERIAL PRIMARY KEY,
-                    category VARCHAR(20),
-                    value INTEGER
-                )
-            """)
-            )
-            session.execute(
-                text("""
-                INSERT INTO test_raw_sql (category, value) VALUES 
-                ('A', 10),
-                ('A', 20),
-                ('B', 30),
-                ('B', 40)
-            """)
-            )
-
-        # Execute raw SQL with aggregation
-        results = db_client_integration.execute_raw_sql(
-            """
-            SELECT category, SUM(value) as total
-            FROM test_raw_sql
-            GROUP BY category
-            ORDER BY category
-            """
-        )
-
-        assert len(results) == 2
-        assert results[0]["category"] == "A"
-        assert results[0]["total"] == 30
-        assert results[1]["category"] == "B"
-        assert results[1]["total"] == 70
-
-        # Cleanup
-        with db_client_integration.get_session() as session:
-            session.execute(text("DROP TABLE IF EXISTS test_raw_sql"))
-
-
-# =============================================================================
-# Dagster Tests
-# =============================================================================
-
-
-@pytest.mark.dagster
-class TestDatabaseResourceDagster:
-    """Tests for DatabaseResource in Dagster context."""
-
-    def test_database_resource_configuration(self):
-        """Test DatabaseResource can be configured properly."""
-        resource = DatabaseResource(
-            host="localhost",
-            port=5432,
-            database="test",
-            user="postgres",
-            password="postgres",
-            backend="postgresql",
-        )
-
-        assert resource.host == "localhost"
-        assert resource.database == "test"
-        assert resource.backend == "postgresql"
-
-    def test_database_resource_get_client(self):
-        """Test getting DatabaseClient from resource."""
-        resource = DatabaseResource(
-            host="localhost",
-            port=5432,
-            database="test",
-            user="postgres",
-            password="postgres",
-        )
-
-        client = resource.get_client()
-
-        assert isinstance(client, DatabaseClient)
-        assert client.backend == DatabaseBackend.POSTGRESQL
-
-
-# =============================================================================
-# Factory Function Tests
-# =============================================================================
-
-
-@pytest.mark.unit
-def test_create_database_client_factory():
-    """Test factory function creates client correctly."""
-    client = create_database_client(
-        host="localhost",
-        database="test",
-        user="postgres",
-        password="postgres",
-    )
-
-    assert isinstance(client, DatabaseClient)
-    assert client.backend == DatabaseBackend.POSTGRESQL
-
-
-@pytest.mark.unit
-def test_create_database_client_supabase():
-    """Test factory function for Supabase."""
-    client = create_database_client(
-        host="db.supabase.co",
-        database="postgres",
-        user="postgres",
-        password="password",
-        backend=DatabaseBackend.SUPABASE,
-    )
-
-    assert isinstance(client, DatabaseClient)
-    assert client.backend == DatabaseBackend.SUPABASE
-
-
-# =============================================================================
-# Performance Tests
-# =============================================================================
-
-
-@pytest.mark.integration
-@pytest.mark.slow
-class TestDatabasePerformance:
-    """Performance tests for database operations."""
-
-    def test_bulk_insert_performance(self, db_client_integration, benchmark_timer):
-        """Test bulk insert performance with large dataset."""
-        # Create table
-        with db_client_integration.get_session() as session:
-            session.execute(
-                text("""
-                CREATE TABLE IF NOT EXISTS test_performance (
-                    id SERIAL PRIMARY KEY,
-                    value INTEGER
-                )
-            """)
-            )
-
-        # Create large dataset
-        data = [{"value": i} for i in range(10000)]
-
-        # Time the bulk insert
-        benchmark_timer.start("bulk_insert")
-        success = db_client_integration.bulk_insert("test_performance", data)
-        benchmark_timer.stop("bulk_insert")
-
-        assert success
-        duration = benchmark_timer.get_duration("bulk_insert")
-        print(f"Bulk insert of 10,000 rows: {duration:.2f}s")
-
-        # Should complete in reasonable time
-        assert duration < 5.0, "Bulk insert took too long"
-
-        # Cleanup
-        with db_client_integration.get_session() as session:
-            session.execute(text("DROP TABLE IF EXISTS test_performance"))
-
-
-# =============================================================================
-# Error Handling Tests
-# =============================================================================
-
-
-@pytest.mark.unit
-class TestErrorHandling:
-    """Tests for error handling."""
-
-    def test_nonexistent_table(self, db_client_integration):
-        """Test querying nonexistent table."""
-        results = db_client_integration.query("nonexistent_table")
-        assert results is None
-
-    def test_invalid_column(self, db_client_integration):
-        """Test querying with invalid column."""
-        # Create table
-        with db_client_integration.get_session() as session:
-            session.execute(
-                text("""
-                CREATE TABLE IF NOT EXISTS test_error (
-                    id SERIAL PRIMARY KEY,
-                    name VARCHAR(100)
-                )
-            """)
-            )
-
-        results = db_client_integration.query(
-            "test_error", columns=["nonexistent_column"]
-        )
-
-        assert results is None
-
-        # Cleanup
-        with db_client_integration.get_session() as session:
-            session.execute(text("DROP TABLE IF EXISTS test_error"))
+        mock_engine.dispose.assert_called_once()
