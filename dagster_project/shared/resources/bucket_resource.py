@@ -88,10 +88,14 @@ class BucketClient:
         Initialize BucketClient.
 
         Args:
-            endpoint_url: MinIO endpoint (e.g., 'http://localhost:9000'). None for S3.
-            access_key: Access key for authentication
-            secret_key: Secret key for authentication
-            region_name: AWS region (default: ap-south-1)
+            config: BucketConfig object that contains -
+                endpoint_url: MinIO endpoint (eg, 'http://localhost:9000'). None for S3.
+                access_key: Access key for authentication
+                secret_key: Secret key for authentication
+                region_name: AWS region (default: ap-south-1)
+                raw_data_bucket: Bucket to store raw data
+                processed_data_bucket: Bucket to store processed data
+                model_bucket: Bucket to store model artifacts
             use_ssl: Use SSL for cnxs (default: True for S3, False for local MinIO)
             max_retries: Maximum number of retry attempts for failed operations
             retry_delay: Initial delay between retries (uses exponential backoff)
@@ -133,15 +137,6 @@ class BucketClient:
 
         return cls(config=BucketConfig.from_env())
 
-    @classmethod
-    def from_custom_config(cls, custom_config: BucketConfig):
-        """
-        Factory method to return a class object configured
-        as per the provided configuration
-        """
-
-        return cls(custom_config)
-
     def _validate_file_format(self, filename: str) -> bool:
         """
         Validate if file format is supported.
@@ -157,12 +152,12 @@ class BucketClient:
         supported_extensions = [fmt.value for fmt in SupportedFormats]
 
         if file_extension not in supported_extensions:
-            self.logger.warning(
-                "Unsupported file format: %s. Supported formats: %s",
-                file_extension,
-                supported_extensions,
+            error_msg = (
+                f"Unsupported file format: {file_extension}. "
+                "Supported formats: {supported_extensions}",
             )
-            return False
+            self.logger.error(error_msg)
+            raise ValueError(error_msg)
         return True
 
     def _retry_with_backoff(self, operation, *args, **kwargs):
@@ -219,21 +214,23 @@ class BucketClient:
 
         # At least one of BucketPath or (bucket_name and key) must be provided
         if bucket_path is None and (bucket_name is None or object_key is None):
-            self.logger.error(
-                "Either bucket_path(of type BucketPath) or"
+            error_msg = (
+                "Either bucket_path(of type BucketPath) or "
                 "(bucket_name and key) must be provided."
             )
-            return False
+            self.logger.error(error_msg)
+            raise ValueError(error_msg)
 
         # Only one of BucketPath or (bucket_name and key) should be provided
         if bucket_path is not None and (
             bucket_name is not None or object_key is not None
         ):
-            self.logger.error(
+            error_msg = (
                 "Only one of bucket_path(of type BucketPath) or"
                 "(bucket_name and key) should be provided."
             )
-            return False
+            self.logger.error(error_msg)
+            raise ValueError(error_msg)
 
         # Set filename for validation and bucket for later use
         if bucket_path is not None:
@@ -257,10 +254,13 @@ class BucketClient:
         metadata: Optional[Dict[str, str]] = None,
     ) -> bool:
         """
-        Upload a file to the bucket.
+        Upload a file to the bucket. Only one of BucketPath or
+        (bucket_name and object_key) should be provided.
 
         Args:
-            bucket_path: Structured path for the object
+            bucket_path: Optional BucketPath object
+            bucket_name: Optional bucket name
+            object_key: Optional object for the file
             file_path: Path to local file (mutually exclusive with file_obj)
             file_obj: File-like object (mutually exclusive with file_path)
             metadata: Optional metadata to attach to the object
@@ -269,28 +269,30 @@ class BucketClient:
             True if upload successful, False otherwise
         """
 
-        bucket, key, filename = self._resolve_bucket_and_key(
-            bucket_path=bucket_path,
-            bucket_name=bucket_name,
-            object_key=object_key,
-        )
-
-        if not self._validate_file_format(filename):
-            # _validate_file_format handles the logging.
-            # If file is valid, no message is logged.
-            return False
-
-        # At least one of file_path or file_obj must be provided
-        if file_path is None and file_obj is None:
-            self.logger.error("Either file_path or file_obj must be provided")
-            return False
-
-        # Only one of file_path or file_obj should be provided
-        if file_path is not None and file_obj is not None:
-            self.logger.error("Only one of file_path or file_obj should be provided")
-            return False
-
         try:
+            bucket, key, filename = self._resolve_bucket_and_key(
+                bucket_path=bucket_path,
+                bucket_name=bucket_name,
+                object_key=object_key,
+            )
+
+            if self._validate_file_format(filename):
+                # If file is valid, no message is logged.
+                # Otherwise, ValueError is raised.
+                pass
+
+            # At least one of file_path or file_obj must be provided
+            if file_path is None and file_obj is None:
+                error_msg = "Either file_path or file_obj must be provided"
+                self.logger.error(error_msg)
+                raise ValueError(error_msg)
+
+            # Only one of file_path or file_obj should be provided
+            if file_path is not None and file_obj is not None:
+                error_msg = "Only one of file_path or file_obj should be provided"
+                self.logger.error(error_msg)
+                raise ValueError(error_msg)
+
             extra_args = {"Metadata": metadata} if metadata else {}
 
             if file_path:
@@ -335,23 +337,27 @@ class BucketClient:
         local_path: Optional[Path] = None,
     ) -> Optional[bytes]:
         """
-        Download a file from the bucket.
+        Download a file from the bucket. Only one of BucketPath or
+        (bucket_name and object_key) should be provided.
 
         Args:
-            bucket_path: Structured path for the object
+            bucket_path: Optional BucketPath object for the file
+            bucket_name: Optional bucket name
+            object_key: Optional object key for the file
             local_path: Optional path to save the file locally
 
         Returns:
             File content as bytes if local_path is None, otherwise None
         """
 
-        bucket, key, _ = self._resolve_bucket_and_key(
-            bucket_path=bucket_path,
-            bucket_name=bucket_name,
-            object_key=object_key,
-        )
-
         try:
+            # Resolve the provided arguments into bucket and object_key
+            bucket, key, _ = self._resolve_bucket_and_key(
+                bucket_path=bucket_path,
+                bucket_name=bucket_name,
+                object_key=object_key,
+            )
+
             if local_path:
                 self._retry_with_backoff(
                     self.s3_client.download_file,
@@ -428,23 +434,25 @@ class BucketClient:
         object_key: Optional[str] = None,
     ) -> bool:
         """
-        Delete a file from the bucket.
+        Delete a file from the bucket. Only one of BucketPath or
+        (bucket_name and object_key) should be provided.
 
         Args:
-            bucket_path: Structured path for the object
+            bucket_path: Optional BucketPath object for the file
+            bucket_name: Optional bucket name
+            object_key: Optional object key for the file
 
         Returns:
             True if deletion successful, False otherwise
         """
 
-        bucket, key, _ = self._resolve_bucket_and_key(
-            bucket_path=bucket_path,
-            bucket_name=bucket_name,
-            object_key=object_key,
-        )
-
         try:
-            key = bucket_path.to_key()
+            bucket, key, _ = self._resolve_bucket_and_key(
+                bucket_path=bucket_path,
+                bucket_name=bucket_name,
+                object_key=object_key,
+            )
+
             self._retry_with_backoff(
                 self.s3_client.delete_object,
                 Bucket=bucket,
@@ -464,22 +472,24 @@ class BucketClient:
         object_key: Optional[str] = None,
     ) -> bool:
         """
-        Check if a file exists in the bucket.
+        Check if a file exists in the bucket. Only one of BucketPath or
+        (bucket_name and object_key) should be provided.
 
         Args:
-            bucket_path: Structured path for the object
+            bucket_path: Optional BucketPath object for the file
+            bucket_name: Optional bucket name
+            object_key: Optional object key for the file
 
         Returns:
             True if file exists, False otherwise
         """
 
-        bucket, key, _ = self._resolve_bucket_and_key(
-            bucket_path=bucket_path,
-            bucket_name=bucket_name,
-            object_key=object_key,
-        )
-
         try:
+            bucket, key, _ = self._resolve_bucket_and_key(
+                bucket_path=bucket_path,
+                bucket_name=bucket_name,
+                object_key=object_key,
+            )
             self.s3_client.head_object(Bucket=bucket, Key=key)
             return True
 
@@ -536,13 +546,16 @@ class BucketClient:
         """
 
         try:
-            if force:
+            objects = self.list_objects(bucket_name)
+
+            if objects and not force:
+                self.logger.info("Bucket cannot be deleted as it is not empty")
+                return False
+
+            if objects:
                 # Delete all objects first
-                objects = self.list_objects(bucket_name)
-                if objects:
-                    for key in objects:
-                        bucket_path = BucketPath.from_key(bucket_name, key)
-                        self.delete_file(bucket_path)
+                for key in objects:
+                    self.delete_file(bucket_name=bucket_name, object_key=key)
 
             self.s3_client.delete_bucket(Bucket=bucket_name)
             self.logger.info("Deleted bucket: %s", bucket_name)
@@ -622,7 +635,7 @@ class BucketClient:
         Download multiple files in batch.
 
         Args:
-            files: List of tuples (BucketPath, local_save_path)
+            files: List of tuples (BucketPath, bucket_name, object_key, local_save_path)
 
         Returns:
             Dictionary mapping bucket paths to download success status
