@@ -1,740 +1,414 @@
 """
-Shared pytest fixtures and configuration for the entire test suite.
-
-This file provides:
-1. Docker service fixtures (PostgreSQL, MinIO)
-2. Dagster-related fixtures (resources, contexts)
-3. Test data fixtures
-4. File and path fixtures
-5. Mock fixtures
+Root conftest.py - Shared fixtures for all tests
 """
 
-# pylint: disable=redefined-outer-name
-
-import json
-import logging
 import os
 import tempfile
-import time
 from pathlib import Path
-from typing import Dict, Generator, Iterator
-from unittest.mock import MagicMock
+from typing import Generator
 
-import boto3
 import numpy as np
 import pandas as pd
-import psycopg2
 import pytest
-from dagster import (
-    DagsterInstance,
-    build_asset_context,
-    build_op_context,
-)
-from dagster._core.execution.context.invocation import DirectAssetExecutionContext
-from pytest_mock.plugin import _mocker
-from sqlalchemy import Engine, create_engine
-from sqlalchemy.orm import sessionmaker
+from dagster import build_asset_context, build_op_context
 
-from dagster_project.shared.resources import (
-    BucketClient,
-    BucketPath,
-    BucketResource,
-)
+# ==========================================================
+# ENVIRONMENT SETUP
+# ==========================================================
 
-# =============================================================================
-# Pytest Configuration
-# =============================================================================
 
+@pytest.fixture(scope="session", autouse=True)
+def setup_environment_variables():
+    """Setup test environment variables"""
 
-def pytest_configure(config):
-    """Configure custom markers for pytest."""
-
-    config.addinivalue_line(
-        "markers", "unit: Unit tests that don't require external services"
-    )
-    config.addinivalue_line(
-        "markers", "integration: Integration tests that require Docker services"
-    )
-    config.addinivalue_line(
-        "markers", "dagster: Tests for Dagster assets, jobs, and resources"
-    )
-    config.addinivalue_line("markers", "slow: Tests that take a long time to run")
-
-
-def pytest_collection_modifyitems(config, items):  # pylint: disable=unused-argument
-    """Automatically mark tests based on their location."""
-
-    for item in items:
-        # Auto-mark integration tests
-        if "integration" in str(item.fspath):
-            item.add_marker(pytest.mark.integration)
-
-        # Auto-mark unit tests
-        if "unit" in str(item.fspath):
-            item.add_marker(pytest.mark.unit)
-
-        # Auto-mark data validation tests
-        if "data_validation" in str(item.fspath):
-            item.add_marker(pytest.mark.slow)
-
-
-# =============================================================================
-# Environment and Configuration Fixtures
-# =============================================================================
-
-
-@pytest.fixture(scope="session")
-def test_env_vars() -> Iterator[Dict[str, str]]:
-    """Set up test environment variables."""
-
-    env_vars = {
-        # PostgreSQL
-        "POSTGRES_USER": "testuser",
-        "POSTGRES_PASSWORD": "testpass",
-        "POSTGRES_HOST": "localhost",
-        "POSTGRES_PORT": "5432",
-        "POSTGRES_DB": "testdb",
-        # MinIO
-        "MINIO_ENDPOINT": "http://localhost:9000",
-        "MINIO_ACCESS_KEY": "minioadmin",
-        "MINIO_SECRET_KEY": "minioadmin",
-        "MINIO_ROOT_USER": "minioadmin",
-        "MINIO_ROOT_PASSWORD": "minioadmin",
-        # Dagster
-        "DAGSTER_HOME": ".dagster_home_test",
-    }
-
-    # Set environment variables
-    for key, value in env_vars.items():
-        os.environ[key] = value
-
-    yield env_vars
-
-    # Cleanup
-    for key in env_vars:
-        os.environ.pop(key, None)
-
-
-# @pytest.fixture(scope="session")
-# def test_settings(test_env_vars):
-#     """Provide test settings/configuration."""
-
-#     from src.config import get_settings
-
-#     return get_settings()
-
-
-# =============================================================================
-# Docker Service Fixtures
-# =============================================================================
-
-
-@pytest.fixture(scope="session")
-def docker_services_available() -> bool:
-    """Check if Docker services are available."""
-
-    try:
-        # Try to connect to PostgreSQL
-        conn = psycopg2.connect(
-            host="localhost",
-            port=5432,
-            user="testuser",
-            password="testpass",
-            dbname="testdb",
-            connect_timeout=3,
-        )
-        conn.close()
-
-        # Try to connect to MinIO
-        s3 = boto3.client(
-            "s3",
-            endpoint_url="http://localhost:9000",
-            aws_access_key_id="minioadmin",
-            aws_secret_access_key="minioadmin",
-        )
-        s3.list_buckets()
-
-        return True
-
-    except Exception:  # pylint: disable=broad-exception-caught
-        return False
-
-
-@pytest.fixture(scope="session")
-def postgres_engine(
-    test_env_vars: Iterator[Dict[str, str]], docker_services_available: bool
-):
-    """Create SQLAlchemy engine for PostgreSQL."""
-
-    if not docker_services_available:
-        pytest.skip("Docker services not available")
-
-    connection_string = (
-        f"postgresql://{test_env_vars['POSTGRES_USER']}:"
-        f"{test_env_vars['POSTGRES_PASSWORD']}@"
-        f"{test_env_vars['POSTGRES_HOST']}:"
-        f"{test_env_vars['POSTGRES_PORT']}/"
-        f"{test_env_vars['POSTGRES_DB']}"
-    )
-
-    engine = create_engine(connection_string)
-
-    yield engine
-
-    engine.dispose()
-
-
-@pytest.fixture(scope="function")
-def db_session(postgres_engine: Engine):
-    """Create a database session for a test."""
-
-    session_object = sessionmaker(bind=postgres_engine)
-    session = session_object()
-
-    yield session
-
-    session.rollback()
-    session.close()
-
-
-# =============================================================================
-# MinIO / S3 Fixtures
-# =============================================================================
-
-
-@pytest.fixture(scope="session")
-def minio_client_session(
-    test_env_vars: Iterator[Dict[str, str]], docker_services_available: bool
-) -> BucketClient:
-    """
-    Create a session-scoped MinIO client for integration tests.
-
-    This client persists across all tests in the session.
-    """
-
-    if not docker_services_available:
-        pytest.skip("Docker services not available")
-
-    client = create_bucket_client(
-        endpoint_url=test_env_vars["MINIO_ENDPOINT"],
-        access_key=test_env_vars["MINIO_ACCESS_KEY"],
-        secret_key=test_env_vars["MINIO_SECRET_KEY"],
-        use_ssl=False,
-    )
-
-    return client
-
-
-@pytest.fixture(scope="function")
-def minio_client(minio_client_session: BucketClient) -> Iterator[BucketClient]:
-    """
-    Function-scoped MinIO client.
-
-    Creates test buckets before each test and cleans up after.
-    """
-
-    # Create test buckets
-    test_buckets = ["test-raw", "test-processed", "test-integration"]
-    for bucket in test_buckets:
-        try:
-            minio_client_session.create_bucket(bucket)
-        except Exception:  # pylint: disable=broad-exception-caught
-            pass  # Bucket might already exist
-
-    yield minio_client_session
-
-    # Cleanup: Delete test buckets
-    for bucket in test_buckets:
-        try:
-            minio_client_session.delete_bucket(bucket, force=True)
-        except Exception:  # pylint: disable=broad-exception-caught
-            pass
-
-
-@pytest.fixture(scope="function")
-def mock_s3_client():
-    """Create a mocked S3 client for unit tests."""
-
-    mock_client = MagicMock()
-
-    # Configure common mock responses
-    mock_client.list_objects_v2.return_value = {
-        "Contents": [
-            {"Key": "2024/Bahrain Grand Prix/Practice 1/data.parquet"},
-            {"Key": "2024/Bahrain Grand Prix/Practice 2/data.parquet"},
-        ]
-    }
-
-    mock_client.head_object.return_value = {}
-    mock_client.list_buckets.return_value = {
-        "Buckets": [
-            {"Name": "test-bucket-1"},
-            {"Name": "test-bucket-2"},
-        ]
-    }
-
-    return mock_client
-
-
-# =============================================================================
-# Dagster Fixtures
-# =============================================================================
-
-
-@pytest.fixture(scope="session")
-def dagster_instance() -> Iterator[DagsterInstance]:
-    """Create a Dagster instance for testing."""
-
-    with tempfile.TemporaryDirectory() as temp_dir:
-        instance = DagsterInstance.ephemeral(tempdir=temp_dir)
-        yield instance
-
-
-@pytest.fixture
-def dagster_op_context(dagster_instance: Iterator[DagsterInstance]):
-    """Create a Dagster op context for testing ops."""
-
-    return build_op_context(instance=dagster_instance)
-
-
-@pytest.fixture
-def dagster_asset_context(dagster_instance: Iterator[DagsterInstance]):
-    """Create a Dagster asset context for testing assets."""
-
-    return build_asset_context(instance=dagster_instance)
-
-
-@pytest.fixture
-def bucket_resource_dagster(test_env_vars: Iterator[Dict[str, str]]) -> BucketResource:
-    """Create a BucketResource for Dagster tests."""
-
-    return BucketResource(
-        endpoint_url=test_env_vars["MINIO_ENDPOINT"],
-        access_key=test_env_vars["MINIO_ACCESS_KEY"],
-        secret_key=test_env_vars["MINIO_SECRET_KEY"],
-        use_ssl=False,
-        max_retries=3,
-        retry_delay=0.5,  # Shorter delay for tests
-    )
-
-
-@pytest.fixture
-def dagster_context_with_resources(
-    dagster_asset_context: DirectAssetExecutionContext,
-    bucket_resource_dagster: BucketResource,
-):
-    """Create a Dagster context with resources attached."""
-
-    # Add resources to context
-    context = dagster_asset_context
-    context.resources = MagicMock()
-    context.resources.bucket_resource = bucket_resource_dagster
-
-    return context
-
-
-# =============================================================================
-# File and Path Fixtures
-# =============================================================================
-
-
-@pytest.fixture
-def temp_dir() -> Generator[Path, None, None]:
-    """Create a temporary directory for test files."""
-
-    with tempfile.TemporaryDirectory() as tmp_dir:
-        yield Path(tmp_dir)
-
-
-@pytest.fixture
-def sample_parquet_file(temp_dir: Path) -> Path:
-    """Create a sample parquet file for testing."""
-
-    df = pd.DataFrame(
-        {
-            "lap": [1, 2, 3, 4, 5],
-            "time": [90.123, 89.456, 88.789, 89.012, 88.345],
-            "driver": ["VER", "HAM", "LEC", "NOR", "SAI"],
-            "team": ["Red Bull", "Mercedes", "Ferrari", "McLaren", "Ferrari"],
-        }
-    )
-
-    file_path = temp_dir / "test_data.parquet"
-    df.to_parquet(file_path)
-
-    return file_path
-
-
-@pytest.fixture
-def sample_csv_file(temp_dir: Path) -> Path:
-    """Create a sample CSV file for testing."""
-
-    df = pd.DataFrame(
-        {
-            "position": [1, 2, 3],
-            "driver": ["VER", "HAM", "LEC"],
-            "points": [25, 18, 15],
-        }
-    )
-
-    file_path = temp_dir / "test_data.csv"
-    df.to_csv(file_path, index=False)
-
-    return file_path
-
-
-@pytest.fixture
-def sample_json_file(temp_dir: Path) -> Path:
-    """Create a sample JSON file for testing."""
-
-    data = {"race": "Bahrain Grand Prix", "year": 2024, "winner": "VER", "laps": 57}
-
-    file_path = temp_dir / "test_data.json"
-    with open(file_path, "w", encoding="utf-8") as f:
-        json.dump(data, f)
-
-    return file_path
-
-
-@pytest.fixture
-def bucket_path_factory():
-    """Factory fixture for creating BucketPath objects."""
-
-    def _create_bucket_path(
-        bucket: str = "test-bucket",
-        year: str = "2024",
-        grand_prix: str = "bahrain",
-        session: str = "practice1",
-        filename: str = "data.parquet",
-    ) -> BucketPath:
-        return BucketPath(
-            bucket=bucket,
-            year=year,
-            grand_prix=grand_prix,
-            session=session,
-            filename=filename,
-        )
-
-    return _create_bucket_path
-
-
-# =============================================================================
-# Test Data Fixtures
-# =============================================================================
-
-
-@pytest.fixture
-def sample_lap_data() -> pd.DataFrame:
-    """Create sample lap time data."""
-    return pd.DataFrame(
-        {
-            "lap": list(range(1, 11)),
-            "time": [
-                90.123,
-                89.456,
-                88.789,
-                89.012,
-                88.345,
-                87.890,
-                88.123,
-                87.567,
-                87.890,
-                88.234,
-            ],
-            "driver": ["VER"] * 10,
-            "compound": ["SOFT"] * 5 + ["MEDIUM"] * 5,
-            "is_personal_best": [
-                False,
-                False,
-                True,
-                False,
-                True,
-                False,
-                False,
-                True,
-                False,
-                False,
-            ],
-        }
-    )
-
-
-@pytest.fixture
-def sample_telemetry_data() -> pd.DataFrame:
-    """Create sample telemetry data."""
-
-    distance = np.linspace(0, 5000, 100)
-    speed = 200 + 50 * np.sin(distance / 1000)
-    throttle = np.clip(80 + 20 * np.sin(distance / 800), 0, 100)
-
-    return pd.DataFrame(
-        {
-            "distance": distance,
-            "speed": speed,
-            "throttle": throttle,
-            "brake": 100 - throttle,
-            "gear": np.random.randint(1, 8, 100),
-        }
-    )
-
-
-@pytest.fixture
-def sample_race_results() -> pd.DataFrame:
-    """Create sample race results data."""
-
-    return pd.DataFrame(
-        {
-            "position": [1, 2, 3, 4, 5],
-            "driver": ["VER", "HAM", "LEC", "NOR", "SAI"],
-            "team": ["Red Bull", "Mercedes", "Ferrari", "McLaren", "Ferrari"],
-            "points": [25, 18, 15, 12, 10],
-            "status": ["Finished"] * 5,
-            "time": ["1:32:15.123", "+5.234", "+12.456", "+18.789", "+25.123"],
-        }
-    )
-
-
-@pytest.fixture
-def fastf1_session_mock():
-    """Create a mock FastF1 session object."""
-
-    mock_session = MagicMock()
-    mock_session.event = MagicMock()
-    mock_session.event.EventName = "Bahrain Grand Prix"
-    mock_session.event.EventDate = "2024-03-02"
-    mock_session.session_name = "Race"
-
-    # Mock laps data
-    mock_session.laps = pd.DataFrame(
-        {
-            "Time": pd.timedelta_range(start="0 days 00:00:00", periods=10, freq="90s"),
-            "Driver": ["VER"] * 10,
-            "LapTime": pd.timedelta_range(
-                start="0 days 00:01:30", periods=10, freq="1s"
-            ),
-            "Compound": ["SOFT"] * 5 + ["MEDIUM"] * 5,
-        }
-    )
-
-    return mock_session
-
-
-# =============================================================================
-# Mock Fixtures for External APIs
-# =============================================================================
-
-
-@pytest.fixture
-def mock_fastf1_api(mocker: Callable[..., Generator[MockerFixture, None, None]]):
-    """Mock the FastF1 API for testing."""
-
-    mock_api = mocker.patch("fastf1.get_session")
-
-    # Configure mock session
-    mock_session = MagicMock()
-    mock_session.load.return_value = None
-    mock_session.laps = pd.DataFrame(
-        {
-            "LapNumber": [1, 2, 3],
-            "LapTime": [90.123, 89.456, 88.789],
-            "Driver": ["VER", "VER", "VER"],
-        }
-    )
-
-    mock_api.return_value = mock_session
-    return mock_api
-
-
-@pytest.fixture
-def mock_supabase_client(mocker: Callable[..., Generator[MockerFixture, None, None]]):  # pylint: disable=unused-argument
-    """Mock Supabase client for testing."""
-
-    mock_client = MagicMock()
-
-    # Configure common operations
-    mock_client.table.return_value.select.return_value.execute.return_value = MagicMock(
-        data=[{"id": 1, "name": "test"}]
-    )
-
-    mock_client.table.return_value.insert.return_value.execute.return_value = MagicMock(
-        data=[{"id": 1}]
-    )
-
-    return mock_client
-
-
-# =============================================================================
-# Utility Fixtures
-# =============================================================================
-
-
-@pytest.fixture
-def assert_dataframes_equal():
-    """Fixture that provides a function to compare DataFrames."""
-
-    def _assert_equal(df1: pd.DataFrame, df2: pd.DataFrame, **kwargs):
-        """Assert two DataFrames are equal."""
-        pd.testing.assert_frame_equal(df1, df2, **kwargs)
-
-    return _assert_equal
-
-
-@pytest.fixture
-def file_comparison_helper():
-    """Helper for comparing files."""
-
-    def _compare_files(file1: Path, file2: Path) -> bool:
-        """Compare two files byte by byte."""
-        with open(file1, "rb") as f1, open(file2, "rb") as f2:
-            return f1.read() == f2.read()
-
-    return _compare_files
-
-
-@pytest.fixture(autouse=True)
-def cleanup_test_files(temp_dir: Path):  # pylint: disable=unused-argument
-    """Automatically cleanup test files after each test."""
-
+    os.environ["ENVIRONMENT"] = "test"
+    os.environ["LOG_LEVEL"] = "DEBUG"
+    os.environ["FASTF1_CACHE_ENABLED"] = "False"
     yield
-    # Cleanup happens automatically with temp_dir context manager
+    # Cleanup after all tests
+
+
+@pytest.fixture(scope="session")
+def test_data_dir() -> Generator[Path, None, None]:
+    """Create temporary directory for test data"""
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        yield Path(tmpdir)
+
+
+# ==========================================================
+# SAMPLE DATA FIXTURES
+# ==========================================================
 
 
 @pytest.fixture
-def capture_logs(caplog: pytest.LogCaptureFixture):
-    """Fixture to capture and analyze logs."""
+def sample_schedule_df() -> pd.DataFrame:
+    """Sample F1 season schedule DataFrame"""
 
-    caplog.set_level(logging.INFO)
-    return caplog
-
-
-# =============================================================================
-# Performance Testing Fixtures
-# =============================================================================
-
-
-@pytest.fixture
-def benchmark_timer():
-    """Fixture for timing test operations."""
-
-    class Timer:
-        """Mock timer class"""
-
-        def __init__(self):
-            self.times = {}
-
-        def start(self, name: str):
-            """Start timing an operation."""
-
-            self.times[name] = {"start": time.time()}
-
-        def stop(self, name: str):
-            """Stop timing an operation."""
-
-            if name in self.times and "start" in self.times[name]:
-                self.times[name]["end"] = time.time()
-                self.times[name]["duration"] = (
-                    self.times[name]["end"] - self.times[name]["start"]
-                )
-
-        def get_duration(self, name: str) -> float:
-            """Get the duration of a timed operation."""
-
-            return self.times.get(name, {}).get("duration", 0.0)
-
-    return Timer()
-
-
-# =============================================================================
-# Parametrized Test Data
-# =============================================================================
-
-
-@pytest.fixture(params=["parquet", "csv", "json"])
-def file_format(request: pytest.FixtureRequest):
-    """Parametrize tests across different file formats."""
-
-    return request.param
-
-
-@pytest.fixture(params=["2023", "2024"])
-def test_year(request: pytest.FixtureRequest):
-    """Parametrize tests across different years."""
-
-    return request.param
-
-
-@pytest.fixture(
-    params=[
-        "Bahrain Grand Prix",
-        "Saudi Arabian Grand Prix",
-        "Australian Grand Prix",
-        "Japanese Grand Prix",
-        "Chinese Grand Prix",
-        "Miami Grand Prix",
-        "Monaco Grand Prix",
-        "Spanish Grand Prix",
-    ]
-)
-def grand_prix(request: pytest.FixtureRequest):
-    """Parametrize tests across different Grand Prix races."""
-
-    return request.param
-
-
-@pytest.fixture(params=["Practice 1", "Practice 2", "Practice 3", "Qualifying", "Race"])
-def session_type(request: pytest.FixtureRequest):
-    """Parametrize tests across different session types."""
-
-    return request.param
-
-
-# =============================================================================
-# Markers and Skip Conditions
-# =============================================================================
-
-skip_if_no_docker = pytest.mark.skipif(
-    not os.path.exists("/.dockerenv") and os.system("docker ps > /dev/null 2>&1") != 0,
-    reason="Docker services not available",
-)
-
-
-skip_if_no_network = pytest.mark.skipif(
-    os.system("ping -c 1 google.com > /dev/null 2>&1") != 0,
-    reason="Network not available",
-)
-
-
-# =============================================================================
-# Custom Assertions
-# =============================================================================
+    return pd.DataFrame(
+        {
+            "RoundNumber": [1, 2, 3],
+            "Country": ["Bahrain", "Saudi Arabia", "Australia"],
+            "Location": ["Sakhir", "Jeddah", "Melbourne"],
+            "OfficialEventName": [
+                "FORMULA 1 GULF AIR BAHRAIN GRAND PRIX 2024",
+                "FORMULA 1 STC SAUDI ARABIAN GRAND PRIX 2024",
+                "FORMULA 1 ROLEX AUSTRALIAN GRAND PRIX 2024",
+            ],
+            "EventDate": [
+                pd.Timestamp("2024-03-02 00:00:00"),
+                pd.Timestamp("2024-03-09 00:00:00"),
+                pd.Timestamp("2024-03-24 00:00:00"),
+            ],
+            "EventName": [
+                "Bahrain Grand Prix",
+                "Saudi Arabian Grand Prix",
+                "Australian Grand Prix",
+            ],
+            "EventFormat": ["conventional", "conventional", "conventional"],
+            "Session1": ["Practice 1", "Practice 1", "Practice 1"],
+            "Session1Date": [
+                pd.Timestamp("2024-02-29 14:30:00+0300"),
+                pd.Timestamp("2024-03-07 16:30:00+0300"),
+                pd.Timestamp("2024-03-22 04:30:00+0300"),
+            ],
+            "Session1DateUtc": [
+                pd.Timestamp("2024-02-29 11:30:00"),
+                pd.Timestamp("2024-03-07 13:30:00"),
+                pd.Timestamp("2024-03-22 01:30:00"),
+            ],
+            "Session2": ["Practice 2", "Practice 2", "Practice 2"],
+            "Session2Date": [
+                pd.Timestamp("2024-02-29 14:30:00+0300"),
+                pd.Timestamp("2024-03-07 16:30:00+0300"),
+                pd.Timestamp("2024-03-22 04:30:00+0300"),
+            ],
+            "Session2DateUtc": [
+                pd.Timestamp("2024-02-29 11:30:00"),
+                pd.Timestamp("2024-03-07 13:30:00"),
+                pd.Timestamp("2024-03-22 01:30:00"),
+            ],
+            "Session3": ["Practice 3", "Practice 3", "Practice 3"],
+            "Session3Date": [
+                pd.Timestamp("2024-02-29 14:30:00+0300"),
+                pd.Timestamp("2024-03-07 16:30:00+0300"),
+                pd.Timestamp("2024-03-22 04:30:00+0300"),
+            ],
+            "Session3DateUtc": [
+                pd.Timestamp("2024-02-29 11:30:00"),
+                pd.Timestamp("2024-03-07 13:30:00"),
+                pd.Timestamp("2024-03-22 01:30:00"),
+            ],
+            "Session4": ["Qualifying", "Qualifying", "Qualifying"],
+            "Session4Date": [
+                pd.Timestamp("2024-02-29 14:30:00+0300"),
+                pd.Timestamp("2024-03-07 16:30:00+0300"),
+                pd.Timestamp("2024-03-22 04:30:00+0300"),
+            ],
+            "Session4DateUtc": [
+                pd.Timestamp("2024-02-29 11:30:00"),
+                pd.Timestamp("2024-03-07 13:30:00"),
+                pd.Timestamp("2024-03-22 01:30:00"),
+            ],
+            "Session5": ["Race", "Race", "Race"],
+            "Session5Date": [
+                pd.Timestamp("2024-02-29 14:30:00+0300"),
+                pd.Timestamp("2024-03-07 16:30:00+0300"),
+                pd.Timestamp("2024-03-22 04:30:00+0300"),
+            ],
+            "Session6DateUtc": [
+                pd.Timestamp("2024-02-29 11:30:00"),
+                pd.Timestamp("2024-03-07 13:30:00"),
+                pd.Timestamp("2024-03-22 01:30:00"),
+            ],
+            "F1ApiSupport": [True, True, True],
+        }
+    )
 
 
 @pytest.fixture
-def assert_valid_bucket_path():
-    """Custom assertion for valid BucketPath."""
+def sample_race_laps_df() -> pd.DataFrame:
+    """Sample F1 session laps DataFrame"""
 
-    def _assert(path: BucketPath):
-        assert path.bucket, "Bucket name cannot be empty"
-        assert path.year, "Year cannot be empty"
-        assert path.grand_prix, "Grand Prix cannot be empty"
-        assert path.session, "Session cannot be empty"
-        assert path.filename, "Filename cannot be empty"
-        assert "/" not in path.filename, "Filename should not contain '/'"
-
-    return _assert
+    return pd.DataFrame(
+        {
+            "Time": {
+                0: pd.Timedelta("0 days 00:57:18.931000"),
+                1: pd.Timedelta("0 days 00:58:44.327000"),
+                2: pd.Timedelta("0 days 01:00:09.506000"),
+            },
+            "Driver": {0: "LEC", 1: "LEC", 2: "LEC"},
+            "DriverNumber": {0: "16", 1: "16", 2: "16"},
+            "LapTime": {
+                0: pd.Timedelta("0 days 00:01:28.179000"),
+                1: pd.Timedelta("0 days 00:01:25.396000"),
+                2: pd.Timedelta("0 days 00:01:25.179000"),
+            },
+            "LapNumber": {0: 1.0, 1: 2.0, 2: 3.0},
+            "Stint": {0: 1.0, 1: 1.0, 2: 1.0},
+            "PitOutTime": {0: None, 1: None, 2: None},
+            "PitInTime": {0: None, 1: None, 2: None},
+            "Sector1Time": {
+                0: None,
+                1: pd.Timedelta("0 days 00:00:27.707000"),
+                2: pd.Timedelta("0 days 00:00:27.679000"),
+            },
+            "Sector2Time": {
+                0: pd.Timedelta("0 days 00:00:29.989000"),
+                1: pd.Timedelta("0 days 00:00:29.265000"),
+                2: pd.Timedelta("0 days 00:00:29.001000"),
+            },
+            "Sector3Time": {
+                0: pd.Timedelta("0 days 00:00:28.398000"),
+                1: pd.Timedelta("0 days 00:00:28.424000"),
+                2: pd.Timedelta("0 days 00:00:28.499000"),
+            },
+            "Sector1SessionTime": {
+                0: None,
+                1: pd.Timedelta("0 days 00:57:46.661000"),
+                2: pd.Timedelta("0 days 00:59:12.029000"),
+            },
+            "Sector2SessionTime": {
+                0: pd.Timedelta("0 days 00:56:50.708000"),
+                1: pd.Timedelta("0 days 00:58:15.926000"),
+                2: pd.Timedelta("0 days 00:59:41.030000"),
+            },
+            "Sector3SessionTime": {
+                0: pd.Timedelta("0 days 00:57:19.087000"),
+                1: pd.Timedelta("0 days 00:58:44.350000"),
+                2: pd.Timedelta("0 days 01:00:09.529000"),
+            },
+            "SpeedI1": {0: 316.0, 1: 315.0, 2: 313.0},
+            "SpeedI2": {0: 313.0, 1: 325.0, 2: 324.0},
+            "SpeedFL": {0: 311.0, 1: 312.0, 2: 313.0},
+            "SpeedST": {0: 300.0, 1: 325.0, 2: 328.0},
+            "IsPersonalBest": {0: False, 1: True, 2: True},
+            "Compound": {0: "MEDIUM", 1: "MEDIUM", 2: "MEDIUM"},
+            "TyreLife": {0: 1.0, 1: 2.0, 2: 3.0},
+            "FreshTyre": {0: True, 1: True, 2: True},
+            "Team": {0: "Ferrari", 1: "Ferrari", 2: "Ferrari"},
+            "LapStartTime": {
+                0: pd.Timedelta("0 days 00:55:50.494000"),
+                1: pd.Timedelta("0 days 00:57:18.931000"),
+                2: pd.Timedelta("0 days 00:58:44.327000"),
+            },
+            "LapStartDate": {0: None, 1: None, 2: None},
+            "TrackStatus": {0: "1", 1: "1", 2: "1"},
+            "Position": {0: 2.0, 1: 2.0, 2: 2.0},
+            "Deleted": {0: None, 1: None, 2: None},
+            "DeletedReason": {0: "", 1: "", 2: ""},
+            "FastF1Generated": {0: False, 1: False, 2: False},
+            "IsAccurate": {0: False, 1: True, 2: True},
+        }
+    )
 
 
 @pytest.fixture
-def assert_valid_parquet_file():
-    """Custom assertion for valid parquet files."""
+def sample_race_results_df() -> pd.DataFrame:
+    """Sample F1 race results DatFrame"""
 
-    def _assert(file_path: Path):
-        assert file_path.exists(), f"File does not exist: {file_path}"
-        assert file_path.suffix == ".parquet", f"Not a parquet file: {file_path}"
+    return pd.DataFrame(
+        {
+            "DriverNumber": {0: "16", 1: "81", 2: "4"},
+            "BroadcastName": {0: "C LECLERC", 1: "O PIASTRI", 2: "L NORRIS"},
+            "Abbreviation": {0: "LEC", 1: "PIA", 2: "NOR"},
+            "DriverId": {0: "leclerc", 1: "piastri", 2: "norris"},
+            "TeamName": {0: "Ferrari", 1: "McLaren", 2: "McLaren"},
+            "TeamColor": {0: "E80020", 1: "FF8000", 2: "FF8000"},
+            "TeamId": {0: "ferrari", 1: "mclaren", 2: "mclaren"},
+            "FirstName": {0: "Charles", 1: "Oscar", 2: "Lando"},
+            "LastName": {0: "Leclerc", 1: "Piastri", 2: "Norris"},
+            "FullName": {0: "Charles Leclerc", 1: "Oscar Piastri", 2: "Lando Norris"},
+            "HeadshotUrl": {
+                0: "www.google.com",
+                1: "www.google.com",
+                2: "www.google.com",
+            },
+            "CountryCode": {0: "MON", 1: "AUS", 2: "GBR"},
+            "Position": {0: 1.0, 1: 2.0, 2: 3.0},
+            "ClassifiedPosition": {0: "1", 1: "2", 2: "3"},
+            "GridPosition": {0: 4.0, 1: 2.0, 2: 1.0},
+            "Q1": {0: None, 1: None, 2: None},
+            "Q2": {0: None, 1: None, 2: None},
+            "Q3": {0: None, 1: None, 2: None},
+            "Time": {
+                0: pd.Timedelta("0 days 01:14:40.727000"),
+                1: pd.Timedelta("0 days 00:00:02.664000"),
+                2: pd.Timedelta("0 days 00:00:06.153000"),
+            },
+            "Status": {0: "Finished", 1: "Finished", 2: "Finished"},
+            "Points": {0: 25.0, 1: 18.0, 2: 16.0},
+            "Laps": {0: 53.0, 1: 53.0, 2: 53.0},
+        }
+    )
 
-        # Try to read it
-        df = pd.read_parquet(file_path)
-        assert len(df) > 0, "Parquet file is empty"
-        assert len(df.columns) > 0, "Parquet file has no columns"
 
-    return _assert
+@pytest.fixture
+def sample_session_status_df() -> pd.DataFrame:
+    """Sample session status DataFrame"""
+
+    return pd.DataFrame(
+        {
+            "Time": {
+                0: pd.Timedelta("0 days 00:00:05.174000"),
+                1: pd.Timedelta("0 days 00:55:50.494000"),
+                2: pd.Timedelta("0 days 02:10:31.456000"),
+            },
+            "Status": {0: "Inactive", 1: "Started", 2: "Finished"},
+        }
+    )
+
+
+@pytest.fixture
+def sample_track_status_df() -> pd.DataFrame:
+    """Sample track status DataFrame"""
+
+    return pd.DataFrame(
+        {
+            "Time": {
+                0: pd.Timedelta("0 days 00:00:00"),
+                1: pd.Timedelta("0 days 00:46:32.143000"),
+                2: pd.Timedelta("0 days 00:46:35.717000"),
+            },
+            "Status": {0: "1", 1: "2", 2: "1"},
+            "Message": {0: "AllClear", 1: "Yellow", 2: "AllClear"},
+        }
+    )
+
+
+@pytest.fixture
+def sample_weather_df() -> pd.DataFrame:
+    """Sample weather DataFrame"""
+
+    return pd.DataFrame(
+        {
+            "Time": {
+                0: pd.Timedelta("0 days 00:01:01.035000"),
+                1: pd.Timedelta("0 days 00:02:01.033000"),
+                2: pd.Timedelta("0 days 00:03:01.033000"),
+            },
+            "AirTemp": {0: 17.9, 1: 17.9, 2: 17.9},
+            "Humidity": {0: 70.0, 1: 70.0, 2: 70.0},
+            "Pressure": {0: 929.9, 1: 929.9, 2: 930.0},
+            "Rainfall": {0: False, 1: False, 2: False},
+            "TrackTemp": {0: 32.7, 1: 32.7, 2: 32.8},
+            "WindDirection": {0: 124, 1: 160, 2: 178},
+            "WindSpeed": {0: 1.0, 1: 1.3, 2: 1.5},
+        }
+    )
+
+
+@pytest.fixture
+def sample_messages_df() -> pd.DataFrame:
+    """Sample race control messges DataFrame"""
+
+    return pd.DataFrame(
+        {
+            "Time": {
+                0: pd.Timestamp("2025-11-09 16:16:20"),
+                1: pd.Timestamp("2025-11-09 16:20:01"),
+                2: pd.Timestamp("2025-11-09 16:30:01"),
+            },
+            "Category": {0: "Other", 1: "Flag", 2: "Other"},
+            "Message": {
+                0: "AWNINGS MAY BE USED",
+                1: "GREEN LIGHT - PIT EXIT OPEN",
+                2: "PIT EXIT CLOSED",
+            },
+            "Status": {0: None, 1: None, 2: None},
+            "Flag": {0: None, 1: "GREEN", 2: None},
+            "Scope": {0: None, 1: "Track", 2: None},
+            "Sector": {
+                0: np.float64("nan"),
+                1: np.float64("nan"),
+                2: np.float64("nan"),
+            },
+            "RacingNumber": {0: None, 1: None, 2: None},
+            "Lap": {0: 1, 1: 1, 2: 1},
+        }
+    )
+
+
+@pytest.fixture
+def sample_session_info_dict() -> dict:
+    """Sample session info dict"""
+
+    return {
+        "Meeting": {
+            "Key": 1273,
+            "Name": "São Paulo Grand Prix",
+            "OfficialName": "FORMULA 1 MSC CRUISES GRANDE PRÊMIO DE SÃO PAULO 2025",
+            "Location": "São Paulo",
+            "Number": 21,
+            "Country": {"Key": 10, "Code": "BRA", "Name": "Brazil"},
+            "Circuit": {"Key": 14, "ShortName": "Interlagos"},
+        },
+        "SessionStatus": "Inactive",
+        "ArchiveStatus": {"Status": "Generating"},
+        "Key": 9869,
+        "Type": "Race",
+        "Name": "Race",
+        "StartDate": pd.Timestamp(2025, 11, 9, 14, 0),
+        "EndDate": pd.Timestamp(2025, 11, 9, 16, 0),
+        "GmtOffset": pd.Timedelta(days=-1, seconds=75600),
+        "Path": "2025/2025-11-09_São_Paulo_Grand_Prix/2025-11-09_Race/",
+    }
+
+
+# ==========================================================
+# DAGSTER CONTEXT FIXTURES
+# ==========================================================
+
+
+@pytest.fixture
+def dagster_asset_context():
+    """Build a Dagster asset execution context for testing"""
+
+    return build_asset_context()
+
+
+@pytest.fixture
+def dagster_op_context():
+    """Build a Dagster op context for testing"""
+
+    return build_op_context()
+
+
+# ==========================================================
+# MOCK FIXTURES
+# ==========================================================
+
+
+@pytest.fixture
+def mock_env_vars(monkeypatch: pytest.MonkeyPatch):
+    """Mock environment variables for testing"""
+    env_vars = {
+        # Database
+        "DB_HOST": "localhost",
+        "DB_PORT": "5432",
+        "DB_USER": "testuser",
+        "DB_PASSWORD": "testpass",
+        "DB_NAME": "testdb",
+        "DB_BACKEND": "postgresql",
+        # MinIO/S3
+        "DOCKER_ENDPOINT": "http://localhost:9000",
+        "ACCESS_KEY": "minioadmin",
+        "SECRET_KEY": "minioadmin",
+        "REGION": "us-east-1",
+        "RAW_DATA_BUCKET": "test-bucket",
+        "PROCESSED_DATA_BUCKET": "test-bucket-processed",
+        "MODEL_BUCKET": "test-bucket-models",
+        # Redis
+        "REDIS_DOCKER_HOST": "localhost",
+        "REDIS_PORT": "6379",
+        "REDIS_DB": "0",
+        # FastF1
+        "FASTF1_CACHE_ENABLED": "False",
+        "FASTF1_CACHE_DIR": "data/test_cache",
+        "FASTF1_LOG_LEVEL": "WARNING",
+    }
+
+    for key, value in env_vars.items():
+        monkeypatch.setenv(key, value)
+
+    return env_vars
