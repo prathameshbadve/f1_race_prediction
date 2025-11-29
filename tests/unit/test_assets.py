@@ -363,7 +363,7 @@ class TestSessionResults:
             )
 
     @patch("dagster_project.ingestion.resources.fastf1")
-    def test_session_laps_l2_hit(
+    def test_session_results_l2_hit(
         self,
         mock_fastf1,
         mock_bucket_client,
