@@ -93,6 +93,8 @@ class RedisClient:
             key_prefix: Prefix for all cache keys (for namespacing)
         """
 
+        self.host = config.host
+        self.port = config.port
         self.max_retries = max_retries
         self.retry_delay = retry_delay
         self.key_prefix = key_prefix
@@ -103,7 +105,6 @@ class RedisClient:
             host=config.host,
             port=config.port,
             db=config.db,
-            # password=config.password,
             socket_timeout=socket_timeout,
             socket_connect_timeout=socket_connect_timeout,
             max_connections=max_connections,

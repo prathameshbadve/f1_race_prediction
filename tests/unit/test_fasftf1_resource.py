@@ -17,7 +17,7 @@ from dagster_project.ingestion.resources import FastF1Resource
 class TestFastF1Init:
     """Test FastF1 Resource Initialization"""
 
-    def test_get_config(self, mock_env_vars):
+    def test_get_config(self):
         """Test config based on environment"""
 
         fastf1_resource = FastF1Resource.from_env()
@@ -32,20 +32,10 @@ class TestFastF1Init:
 class TestGetSeasonSchedule:
     """Test get season schedule"""
 
-    @patch("dagster_project.ingestion.resources.fastf1")
-    def test_get_season_schedule_success(
-        self,
-        mock_fastf1,
-        sample_schedule_df,
-        mock_env_vars,
-    ):
+    def test_get_season_schedule_success(self, mock_fastf1_resource):
         """Test get season schedule"""
 
-        mock_fastf1.get_event_schedule.return_value = sample_schedule_df
-
-        fastf1_resource = FastF1Resource.from_env()
-
-        result = fastf1_resource.get_season_schedule(year=2024)
+        result = mock_fastf1_resource.get_season_schedule(year=2024)
 
         assert len(result) == 3
         assert isinstance(result, pd.DataFrame)
@@ -55,24 +45,19 @@ class TestGetSeasonSchedule:
 class TestGetSessionData:
     """Test get session object and associated data"""
 
-    @patch("dagster_project.ingestion.resources.fastf1")
-    def test_get_session_object(self, mock_fastf1, mock_env_vars):
+    def test_get_session_object(self, mock_fastf1_resource, mock_fastf1_session):
         """Test get session object"""
 
-        mock_session = MagicMock(spec=Session)
-        mock_fastf1.get_session.return_value = mock_session
-
-        fastf1_resource = FastF1Resource.from_env()
-        session_object = fastf1_resource.get_session_object(
+        session_object = mock_fastf1_resource.get_session_object(
             year=2024,
             grand_prix="Italian Grand Prix",
             session="Race",
         )
 
-        assert isinstance(session_object, Session)
+        assert session_object == mock_fastf1_session
 
     @patch("dagster_project.ingestion.resources.fastf1")
-    def test_get_session_object_failure(self, mock_fastf1, mock_env_vars):
+    def test_get_session_object_failure(self, mock_fastf1):
         """Test get session object"""
 
         mock_fastf1.get_session.side_effect = InvalidSessionError()
@@ -87,9 +72,7 @@ class TestGetSessionData:
             )
 
     @patch("dagster_project.ingestion.resources.fastf1")
-    def test_get_session_results(
-        self, mock_fastf1, sample_race_results_df, mock_env_vars
-    ):
+    def test_get_session_results(self, mock_fastf1, sample_race_results_df):
         """Test session results"""
 
         mock_session = MagicMock(spec=Session)
@@ -118,7 +101,6 @@ class TestGetSessionData:
         sample_race_laps_df,
         sample_session_status_df,
         sample_track_status_df,
-        mock_env_vars,
     ):
         """Test session results"""
 
@@ -148,7 +130,7 @@ class TestGetSessionData:
         assert len(track_status) == 3
 
     @patch("dagster_project.ingestion.resources.fastf1")
-    def test_get_session_weather(self, mock_fastf1, sample_weather_df, mock_env_vars):
+    def test_get_session_weather(self, mock_fastf1, sample_weather_df):
         """Test session weather"""
 
         mock_session = MagicMock(spec=Session)
@@ -171,7 +153,7 @@ class TestGetSessionData:
         assert len(weather) == 3
 
     @patch("dagster_project.ingestion.resources.fastf1")
-    def test_get_session_messages(self, mock_fastf1, sample_messages_df, mock_env_vars):
+    def test_get_session_messages(self, mock_fastf1, sample_messages_df):
         """Test session messages"""
 
         mock_session = MagicMock(spec=Session)
@@ -194,9 +176,7 @@ class TestGetSessionData:
         assert len(messages) == 3
 
     @patch("dagster_project.ingestion.resources.fastf1")
-    def test_get_session_info(
-        self, mock_fastf1, sample_session_info_dict, mock_env_vars
-    ):
+    def test_get_session_info(self, mock_fastf1, sample_session_info_dict):
         """Test session info"""
 
         mock_session = MagicMock(spec=Session)
