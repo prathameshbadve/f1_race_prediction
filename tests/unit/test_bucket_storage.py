@@ -660,6 +660,7 @@ class TestBucketClientBatch:
         assert mock_bucket_client.s3_client.download_fileobj.call_count == 2
 
 
+@pytest.mark.unit
 class TestBucketClientBuckets:
     """Test BucketClient bucket creation and deletion"""
 
