@@ -10,7 +10,6 @@ from typing import Generator
 import numpy as np
 import pandas as pd
 import pytest
-from dagster import build_asset_context, build_op_context
 
 # ==========================================================
 # ENVIRONMENT SETUP
@@ -495,22 +494,3 @@ def sample_session_info_dict() -> dict:
         "GmtOffset": pd.Timedelta(days=-1, seconds=75600),
         "Path": "2025/2025-11-09_São_Paulo_Grand_Prix/2025-11-09_Race/",
     }
-
-
-# ==========================================================
-# DAGSTER CONTEXT FIXTURES
-# ==========================================================
-
-
-@pytest.fixture
-def dagster_asset_context():
-    """Build a Dagster asset execution context for testing"""
-
-    return build_asset_context()
-
-
-@pytest.fixture
-def dagster_op_context():
-    """Build a Dagster op context for testing"""
-
-    return build_op_context()
