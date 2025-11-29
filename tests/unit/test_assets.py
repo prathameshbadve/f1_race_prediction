@@ -184,6 +184,7 @@ class TestSeasonSchedule:
             )
 
 
+@pytest.mark.unit
 class TestSessionLaps:
     """Test Session Laps asset"""
 
