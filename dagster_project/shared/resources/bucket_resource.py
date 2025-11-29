@@ -528,10 +528,10 @@ class BucketClient:
         except ClientError as e:
             if e.response["Error"]["Code"] == "BucketAlreadyOwnedByYou":
                 self.logger.warning("Bucket %s already exists", bucket_name)
-                return True
+                raise
 
             self.logger.error("Failed to create bucket: %s", str(e))
-            return False
+            raise
 
     def delete_bucket(self, bucket_name: str, force: bool = False) -> bool:
         """
