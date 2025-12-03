@@ -4,12 +4,19 @@ Shared fixtures for integration tests
 
 # pylint: disable=protected-access, redefined-outer-name
 
+from unittest.mock import MagicMock, Mock, patch
+
 import pytest
+from fastf1.core import Session as FastF1Session
 from testcontainers.minio import MinioContainer
 from testcontainers.postgres import PostgresContainer
 from testcontainers.redis import RedisContainer
 
-from dagster_project.shared.resources import BucketClient, RedisClient
+from dagster_project.ingestion.resources import FastF1Resource
+from dagster_project.shared.resources import (
+    BucketClient,
+    RedisClient,
+)
 from src.config.settings import BucketConfig, RedisConfig
 
 # =============================================================================
@@ -93,3 +100,25 @@ def postgres_container():
 
     with PostgresContainer("postgres:16-alpine") as postgres:
         yield postgres
+
+
+@pytest.fixture
+def mock_fastf1_session():
+    """Mock fastf1 session object"""
+
+    fastf1_session = Mock(spec=FastF1Session)
+    fastf1_session.load = MagicMock()
+    return fastf1_session
+
+
+@pytest.fixture
+def mock_fastf1_resource(mock_fastf1_session, sample_schedule_df):
+    """Mock FastF1 resource for testing"""
+
+    with patch("dagster_project.ingestion.resources.fastf1") as mock_fastf1:
+        mock_fastf1.get_event_schedule.return_value = sample_schedule_df
+        mock_fastf1.get_session.return_value = mock_fastf1_session
+        resource = FastF1Resource.from_env()
+        resource._logger = Mock()
+
+        yield resource
