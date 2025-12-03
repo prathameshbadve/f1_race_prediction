@@ -227,7 +227,7 @@ class RedisClient:
                 serialized = json.dumps(value).encode("utf-8")
             elif isinstance(value, pd.DataFrame):
                 buffer = io.BytesIO()
-                value.to_parquet(buffer)
+                value.to_parquet(buffer, index=False)
                 serialized = buffer.getvalue()
             elif isinstance(value, str):
                 serialized = value.encode("utf-8")
