@@ -475,7 +475,9 @@ class RedisClient:
 
         return self.get(key, data_type=CacheDataType.JSON, return_type=dict)
 
-    def invalidate_pattern(self, pattern: str) -> int:
+    def invalidate_pattern(
+        self, pattern: str, data_type: Optional[CacheDataType] = None
+    ) -> int:
         """
         Delete all keys matching a pattern.
 
@@ -491,7 +493,7 @@ class RedisClient:
         """
 
         try:
-            full_pattern = self._build_key(pattern)
+            full_pattern = self._build_key(pattern, data_type)
             keys = self.client.keys(full_pattern)
 
             if not keys:
