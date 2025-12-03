@@ -161,7 +161,7 @@ jobs:
 
       - name: Test Dagster definitions load
         run: |
-          python -c "from dagster_project.definitions import defs; print('Dagster definitions loaded successfully')"
+          python -c "from dagster_project.ingestion.defs import defs; print('Dagster definitions loaded successfully')"
 
       - name: Run Dagster-specific tests
         run: pytest tests/integration -m "dagster" -v --cov-report=xml
