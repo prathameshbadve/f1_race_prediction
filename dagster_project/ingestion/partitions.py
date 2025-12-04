@@ -7,12 +7,18 @@ from dagster import (
     StaticPartitionsDefinition,
 )
 
+from src.config.settings import FastF1Config
+
+fastf1_config = FastF1Config.from_env()
+
 # =============================================================================
 # Static Partitions
 # =============================================================================
 
 # This is the partitions definition for F1 seasons
-F1_SEASON_PARTITION = StaticPartitionsDefinition(["2023", "2024"])
+F1_SEASON_PARTITION = StaticPartitionsDefinition(
+    [str(i) for i in range(fastf1_config.start_year, fastf1_config.end_year + 1)]
+)
 
 # =============================================================================
 # Dynamic Partitions (Populated by Asset Sensor)
