@@ -93,6 +93,8 @@ class RedisClient:
             key_prefix: Prefix for all cache keys (for namespacing)
         """
 
+        self.host = config.host
+        self.port = config.port
         self.max_retries = max_retries
         self.retry_delay = retry_delay
         self.key_prefix = key_prefix
@@ -103,7 +105,6 @@ class RedisClient:
             host=config.host,
             port=config.port,
             db=config.db,
-            # password=config.password,
             socket_timeout=socket_timeout,
             socket_connect_timeout=socket_connect_timeout,
             max_connections=max_connections,
@@ -125,12 +126,6 @@ class RedisClient:
         """Factory to create RedisClient from environment variables."""
 
         return cls(config=RedisConfig.from_env())
-
-    @classmethod
-    def from_custom_config(cls, custom_config: RedisConfig):
-        """Factory to create RedisClient from custom config"""
-
-        return cls(custom_config)
 
     def _build_key(self, key: str, data_type: Optional[CacheDataType] = None) -> str:
         """
@@ -232,7 +227,7 @@ class RedisClient:
                 serialized = json.dumps(value).encode("utf-8")
             elif isinstance(value, pd.DataFrame):
                 buffer = io.BytesIO()
-                value.to_parquet(buffer)
+                value.to_parquet(buffer, index=False)
                 serialized = buffer.getvalue()
             elif isinstance(value, str):
                 serialized = value.encode("utf-8")
@@ -480,7 +475,9 @@ class RedisClient:
 
         return self.get(key, data_type=CacheDataType.JSON, return_type=dict)
 
-    def invalidate_pattern(self, pattern: str) -> int:
+    def invalidate_pattern(
+        self, pattern: str, data_type: Optional[CacheDataType] = None
+    ) -> int:
         """
         Delete all keys matching a pattern.
 
@@ -496,7 +493,7 @@ class RedisClient:
         """
 
         try:
-            full_pattern = self._build_key(pattern)
+            full_pattern = self._build_key(pattern, data_type)
             keys = self.client.keys(full_pattern)
 
             if not keys:

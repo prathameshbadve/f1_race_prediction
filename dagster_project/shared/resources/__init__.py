@@ -18,6 +18,7 @@ from .redis_resource import (
     CacheDataType,
     RedisClient,
     RedisResource,
+    cache_query,
 )
 
 __all__ = [
@@ -32,4 +33,5 @@ __all__ = [
     "RedisClient",
     "RedisResource",
     "SupportedFormats",
+    "cache_query",
 ]
