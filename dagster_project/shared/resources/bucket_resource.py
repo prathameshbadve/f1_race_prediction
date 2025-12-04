@@ -500,6 +500,31 @@ class BucketClient:
             self.logger.error("Error checking file existence: %s", str(e))
             return False
 
+    def bucket_exists(self, bucket_name: str) -> bool:
+        """
+        Check if bucket with the passed name exists
+
+        Args:
+            bucket_name: Name of bucket to check
+
+        Returns:
+            True if file exists, False otherwise
+        """
+
+        try:
+            self.s3_client.head_bucket(Bucket=bucket_name)
+            return True
+
+        except ClientError as e:
+            # If a ClientError is raised, check the error code
+            # A 404 error indicates the bucket does not exist
+            # Other errors might indicate permission issues or other problems
+            if e.response["Error"]["Code"] == 404:
+                return False
+
+            self.logger.error("Error checking bucket '%s': %s", bucket_name, str(e))
+            return False
+
     def create_bucket(self, bucket_name: str) -> bool:
         """
         Create a new bucket.

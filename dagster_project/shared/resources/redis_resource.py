@@ -227,7 +227,7 @@ class RedisClient:
                 serialized = json.dumps(value).encode("utf-8")
             elif isinstance(value, pd.DataFrame):
                 buffer = io.BytesIO()
-                value.to_parquet(buffer)
+                value.to_parquet(buffer, index=False)
                 serialized = buffer.getvalue()
             elif isinstance(value, str):
                 serialized = value.encode("utf-8")
@@ -475,7 +475,9 @@ class RedisClient:
 
         return self.get(key, data_type=CacheDataType.JSON, return_type=dict)
 
-    def invalidate_pattern(self, pattern: str) -> int:
+    def invalidate_pattern(
+        self, pattern: str, data_type: Optional[CacheDataType] = None
+    ) -> int:
         """
         Delete all keys matching a pattern.
 
@@ -491,7 +493,7 @@ class RedisClient:
         """
 
         try:
-            full_pattern = self._build_key(pattern)
+            full_pattern = self._build_key(pattern, data_type)
             keys = self.client.keys(full_pattern)
 
             if not keys:

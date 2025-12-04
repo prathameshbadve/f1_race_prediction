@@ -34,7 +34,8 @@ env = [
     "DAGSTER_HOME=.dagster_home_test",
 ]
 filterwarnings = [
-    "ignore::pydantic.warnings.PydanticDeprecatedSince20"
+    "ignore::pydantic.warnings.PydanticDeprecatedSince20",
+    "ignore::DeprecationWarning:testcontainers.*",
 ]
 
 [tool.coverage.run]
@@ -44,6 +45,8 @@ omit = [
     "*/__pycache__/*",
     "*/venv/*",
     "*/.venv/*",
+    "dagster_project/ingestion/resources.py",
+    "dagster_project/shared/resources/db_resource.py",
 ]
 
 [tool.coverage.report]
