@@ -129,6 +129,10 @@ class FastF1Config(BaseConfig):
     # Testing sessions
     include_testing: Optional[bool] = None
 
+    # Years to ingest
+    start_year: Optional[int] = None
+    end_year: Optional[int] = None
+
     @classmethod
     def from_env(cls):
         """Factory to create FastF1Config from environment variables."""
@@ -148,4 +152,6 @@ class FastF1Config(BaseConfig):
             include_testing=(
                 os.getenv("FASTF1_INCLUDE_TESTING", "False").lower() == "true"
             ),
+            start_year=int(os.getenv("START_YEAR", "2018")),
+            end_year=int(os.getenv("START_YEAR", "2025")),
         )
