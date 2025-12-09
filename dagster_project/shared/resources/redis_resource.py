@@ -93,6 +93,7 @@ class RedisClient:
             key_prefix: Prefix for all cache keys (for namespacing)
         """
 
+        self.redis_url = config.redis_url
         self.host = config.host
         self.port = config.port
         self.max_retries = max_retries
@@ -100,26 +101,34 @@ class RedisClient:
         self.key_prefix = key_prefix
         self.logger = get_logger("resources.redis")
 
-        # Create connection pool
-        self.pool = redis.ConnectionPool(
-            host=config.host,
-            port=config.port,
-            db=config.db,
-            socket_timeout=socket_timeout,
-            socket_connect_timeout=socket_connect_timeout,
-            max_connections=max_connections,
-            decode_responses=decode_responses,
-        )
+        if self.redis_url is not None:
+            self.client = redis.from_url(
+                config.redis_url, max_connections=50, decode_responses=False
+            )
 
-        # Create Redis client with connection pool
-        self.client = redis.Redis(connection_pool=self.pool)
+            self.logger.info("RedisClient initialized for Upstash server")
 
-        self.logger.info(
-            "RedisClient initialized (host=%s, port=%s, db=%s)",
-            config.host,
-            config.port,
-            config.db,
-        )
+        else:
+            # Create connection pool
+            self.pool = redis.ConnectionPool(
+                host=config.host,
+                port=config.port,
+                db=config.db,
+                socket_timeout=socket_timeout,
+                socket_connect_timeout=socket_connect_timeout,
+                max_connections=max_connections,
+                decode_responses=decode_responses,
+            )
+
+            # Create Redis client with connection pool
+            self.client = redis.Redis(connection_pool=self.pool)
+
+            self.logger.info(
+                "RedisClient initialized (host=%s, port=%s, db=%s)",
+                config.host,
+                config.port,
+                config.db,
+            )
 
     @classmethod
     def from_env(cls):
