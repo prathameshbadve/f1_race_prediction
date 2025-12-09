@@ -11,7 +11,9 @@ from dagster_project.ingestion.assets import (
     session_results,
     session_weather,
 )
+from dagster_project.ingestion.jobs import session_data_job
 from dagster_project.ingestion.resources import FastF1Resource
+from dagster_project.ingestion.schedules import yearly_session_ingestion_schedule
 from dagster_project.ingestion.sensors import (
     update_partitions_on_schedule_materialization,
 )
@@ -25,6 +27,8 @@ defs = Definitions(
         session_results,
         session_weather,
     ],
+    jobs=[session_data_job],
+    schedules=[yearly_session_ingestion_schedule],
     resources={
         "bucket_resource": BucketResource.from_env(),
         "redis_resource": RedisResource.from_env(),
