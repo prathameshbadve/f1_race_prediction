@@ -93,6 +93,7 @@ class DatabaseConfig(BaseConfig):
 class RedisConfig(BaseConfig):
     """Congifuration for Redis Cache"""
 
+    redis_url: Optional[str] = None
     host: Optional[str] = None
     port: int = 6379
     db: int = 0
@@ -103,7 +104,8 @@ class RedisConfig(BaseConfig):
         """Factory to create RedisConfig from environment variables."""
 
         return cls(
-            host=os.getenv("REDIS_DOCKER_HOST", "localhost"),
+            redis_url=os.getenv("REDIS_URL", None),
+            host=os.getenv("REDIS_DOCKER_HOST", None),
             port=int(os.getenv("REDIS_PORT", "6379")),
             db=int(os.getenv("REDIS_DB", "0")),
             password=os.getenv("REDIS_PASSWORD", None),
@@ -153,5 +155,5 @@ class FastF1Config(BaseConfig):
                 os.getenv("FASTF1_INCLUDE_TESTING", "False").lower() == "true"
             ),
             start_year=int(os.getenv("START_YEAR", "2018")),
-            end_year=int(os.getenv("START_YEAR", "2025")),
+            end_year=int(os.getenv("END_YEAR", "2025")),
         )
