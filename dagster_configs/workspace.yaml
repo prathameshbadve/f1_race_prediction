@@ -2,3 +2,4 @@
 
 load_from:
   - python_package: dagster_project.ingestion
+  - python_package: dagster_project.transformation
