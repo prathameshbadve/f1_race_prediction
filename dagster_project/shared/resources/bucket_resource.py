@@ -46,28 +46,45 @@ class BucketPath:
     grand_prix: str
     session: str
     filename: str
+    prefix: Optional[str] = None
 
     def to_key(self) -> str:
         """Convert to S3/MinIO object key."""
 
-        return f"{self.year}/{self.grand_prix}/{self.session}/{self.filename}"
+        if self.prefix is None:
+            return f"{self.year}/{self.grand_prix}/{self.session}/{self.filename}"
+
+        return (
+            f"{self.prefix}/{self.year}/{self.grand_prix}/"
+            f"{self.session}/{self.filename}"
+        )
 
     @classmethod
     def from_key(cls, bucket: str, key: str) -> "BucketPath":
         """Create BucketPath from object key."""
 
         parts = key.split("/")
-        if len(parts) != 4:
+        if len(parts) == 4:
+            return cls(
+                bucket=bucket,
+                year=parts[0],
+                grand_prix=parts[1],
+                session=parts[2],
+                filename=parts[3],
+            )
+        elif len(parts) == 5:
+            return cls(
+                bucket=bucket,
+                year=parts[1],
+                grand_prix=parts[2],
+                session=parts[3],
+                filename=parts[4],
+                prefix=parts[0],
+            )
+        else:
             raise ValueError(
                 f"Invalid key format: {key}. Expected: year/grand_prix/session/filename"
             )
-        return cls(
-            bucket=bucket,
-            year=parts[0],
-            grand_prix=parts[1],
-            session=parts[2],
-            filename=parts[3],
-        )
 
 
 class BucketClient:
